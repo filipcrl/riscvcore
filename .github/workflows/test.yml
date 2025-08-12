@@ -14,8 +14,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Cleanup
-        run: sed -i "s/%NAME%/test/g" build.mill
       - name: Cache Scala
         uses: coursier/cache-action@v6
       - name: Setup Scala
@@ -29,5 +27,3 @@ jobs:
           verilator --version
       - name: SBT Test
         run: sbt test
-      - name: mill Test
-        run: ./mill _.test
