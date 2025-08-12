@@ -2,13 +2,13 @@
 
 ThisBuild / scalaVersion     := "2.13.16"
 ThisBuild / version          := "0.1.0"
-ThisBuild / organization     := "%ORGANIZATION%"
+ThisBuild / organization     := "com.github.filipcrl"
 
 val chiselVersion = "7.0.0-RC1"
 
 lazy val root = (project in file("."))
   .settings(
-    name := "%NAME%",
+    name := "riscvcore",
     libraryDependencies ++= Seq(
       "org.chipsalliance" %% "chisel" % chiselVersion,
       "org.scalatest" %% "scalatest" % "3.2.19" % "test",
