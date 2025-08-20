@@ -2,7 +2,9 @@ package core
 
 import chisel3._
 import chisel3.util._
+import chisel3.util.experimental.BoringUtils
 import chisel3.util.experimental.loadMemoryFromFileInline
+import chisel3.experimental.hierarchy.{instantiable, public}
 
 class IMem(xlen: Int, depthWords: Int = 65536, hexPath: Option[String] = None) extends Module {
   val io = IO(new Bundle {
@@ -21,25 +23,48 @@ class DMem(xlen: Int, depthWords: Int = 65536, hexPath: Option[String] = None) e
     val raddr = Input(UInt(xlen.W))
     val ld_type = Input(UInt(3.W))
     val rdata = Output(UInt(32.W))
-    // val wen = Input(Bool())
-    // val waddr = Input(UInt(xlen.W))
-    // val wdata = Input(UInt(xlen.W))
+    val waddr = Input(UInt(xlen.W))
+    val st_type = Input(UInt(2.W))
+    val wdata = Input(UInt(32.W))
   })
 
-  val mem = Mem(depthWords, UInt(32.W))
+  val mem = Mem(depthWords, Vec(4, UInt(8.W)))
   hexPath.foreach(p => loadMemoryFromFileInline(mem, p))
 
   import Control._
 
-  val word = mem(io.raddr >> 2)
-  val offset = io.raddr(1, 0)
-  val byte = (word >> (offset << 3))(7, 0)
+  val line  = mem(io.raddr >> 2)
+  val rByte = Mux1H(UIntToOH(io.raddr(1,0), 4), line)
+  val rHalf = Mux(io.raddr(1), Cat(line(3), line(2)), Cat(line(1), line(0)))
+  val rWord = Cat(line.reverse)
 
-  when(io.ld_type === LD_LB) {
-    io.rdata := byte.asSInt.pad(32).asUInt
-  }.otherwise {
-    io.rdata := 0.U(32.W)
-  }
+  io.rdata := MuxLookup(io.ld_type, 0.U)(Seq(
+    LD_LB  -> rByte.asSInt.pad(32).asUInt,
+    LD_LBU -> rByte.pad(32),
+    LD_LH  -> rHalf.asSInt.pad(32).asUInt,
+    LD_LHU -> rHalf.pad(32),
+    LD_LW  -> rWord
+  ))
+
+  val mask = MuxLookup(io.st_type, 0.U(4.W))(Seq(
+    ST_SB -> UIntToOH(io.waddr(1, 0), 4),
+    ST_SH -> Mux(io.waddr(1), "b1100".U, "b0011".U),
+    ST_SW -> "b1111".U
+  ))
+
+  val wOff = io.waddr(1, 0)
+
+  val baseLane = MuxLookup(io.st_type, 0.U(2.W))(Seq(
+    ST_SB -> wOff,
+    ST_SH -> Cat(wOff(1), 0.U(1.W)),
+    ST_SW -> 0.U
+  ))
+
+  val shamt = (baseLane << 3)
+  val aligned = (io.wdata << shamt)(31,0)
+  val wVec = VecInit.tabulate(4)(i => aligned(8*i+7, 8*i))
+
+  mem.write(io.waddr >> 2, wVec, mask.asBools)
 }
 
 class RegFile(xlen: Int) extends Module {
@@ -48,17 +73,17 @@ class RegFile(xlen: Int) extends Module {
     val raddr2 = Input(UInt(5.W))
     val rdata1 = Output(UInt(xlen.W))
     val rdata2 = Output(UInt(xlen.W))
-    val wen = Input(Bool())
-    val waddr = Input(UInt(5.W))
-    val wdata = Input(UInt(xlen.W))
+    val wen    = Input(Bool())
+    val waddr  = Input(UInt(5.W))
+    val wdata  = Input(UInt(xlen.W))
   })
 
-  val regs = Mem(32, UInt(xlen.W)) 
+  val regs = RegInit(VecInit(Seq.fill(32)(0.U(xlen.W))))
 
   io.rdata1 := Mux(io.raddr1.orR, regs(io.raddr1), 0.U)
   io.rdata2 := Mux(io.raddr2.orR, regs(io.raddr2), 0.U)
 
-  when(io.wen & io.waddr.orR) {
+  when (io.wen && io.waddr.orR) {
     regs(io.waddr) := io.wdata
   }
 }
@@ -127,6 +152,7 @@ object Control {
   val IMM_Z = 6.U(3.W)
 
   // wb_sel
+  val WB_XXX = 0.U(1.W)
   val WB_ALU = 0.U(1.W)
   val WB_MEM = 1.U(1.W)
 
@@ -153,7 +179,15 @@ object Control {
 
   val map = Array(
     // Loads
-    LB -> List(B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LB, WB_MEM, Y)
+    LB -> List(B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LB, WB_MEM, Y),
+    LH -> List(B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LH, WB_MEM, Y),
+    LW -> List(B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LW, WB_MEM, Y),
+    LBU -> List(B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LBU, WB_MEM, Y),
+    LHU -> List(B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LHU, WB_MEM, Y),
+    // Stores
+    SB -> List(B_IMM, IMM_S, ALU_ADD, ST_SB, LD_XXX, WB_XXX, N),
+    SH -> List(B_IMM, IMM_S, ALU_ADD, ST_SH, LD_XXX, WB_XXX, N),
+    SW -> List(B_IMM, IMM_S, ALU_ADD, ST_SW, LD_XXX, WB_XXX, N),
   )
 }
 
@@ -273,6 +307,9 @@ class Core(xlen: Int, hexPath: String, dataHexPath: Option[String]) extends Modu
   // Data memory
   dmem.io.raddr   := alu.io.out
   dmem.io.ld_type := control.io.ld_type
+  dmem.io.st_type := control.io.st_type
+  dmem.io.waddr := alu.io.out
+  dmem.io.wdata := regs.io.rdata2
 
   // ---- Expose signals to anchor the design and for wave debug ----
   io.pc_out     := pc
@@ -305,4 +342,14 @@ class Core(xlen: Int, hexPath: String, dataHexPath: Option[String]) extends Modu
   val func3  = inst(14, 12)
   dontTouch(opcode); dontTouch(func3)
   dontTouch(rd); dontTouch(rs1); dontTouch(rs2)
+}
+
+class CoreWithTaps(xlen: Int, hexPath: String, dataHexPath: Option[String])
+    extends Core(xlen, hexPath, dataHexPath) {
+
+  // Make it a real port so the simulator maps it
+  val regsTap = IO(Output(Vec(32, UInt(xlen.W))))
+
+  // If regs.regs is inside a submodule, keep using BoringUtils to pull it out:
+  regsTap := BoringUtils.tapAndRead[Vec[UInt]](regs.regs)
 }
