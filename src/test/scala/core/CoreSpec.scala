@@ -150,5 +150,62 @@ class CoreSpec extends AnyFunSpec with ChiselSim {
         assert(r(12) == h("80ff017f"))
       }
     }
+
+    it("shifts") {
+      val prog = Seq(
+        "00002083", // lw   x1, 0(x0)      ; x1 = 0x80000001
+        "00402103", // lw   x2, 4(x0)      ; x2 = 31
+        "002091b3", // sll  x3, x1, x2     ; 0x80000001 << 31 -> 0x80000000
+        "0020d233", // srl  x4, x1, x2     ; 0x80000001 >>> 31 -> 0x00000001
+        "4020d2b3", // sra  x5, x1, x2     ; 0x80000001 >>s 31 -> 0xFFFFFFFF
+        "00109313", // slli x6, x1, 1      ; 0x80000001 << 1  -> 0x00000002
+        "0010d393", // srli x7, x1, 1      ; 0x80000001 >>> 1 -> 0x40000000
+        "4010d413"  // srai x8, x1, 1      ; 0x80000001 >>s 1  -> 0xC0000000
+      )
+      val data = Seq(
+        "80000001", // mem[0..3] = 01 00 00 80 (LE)
+        "0000001F"  // mem[4..7] = 1F 00 00 00 (31)
+      )
+      run(prog, data, "shifts") { r =>
+        val exp = Map(
+          1 -> h("80000001"),
+          2 -> h("0000001F"),
+          3 -> h("80000000"),
+          4 -> h("00000001"),
+          5 -> h("FFFFFFFF"),
+          6 -> h("00000002"),
+          7 -> h("40000000"),
+          8 -> h("C0000000")
+        )
+        exp.foreach { case (i, v) =>
+          assert(r(i) == v, f"x$i = 0x${r(i)}%08x != 0x${v}%08x")
+        }
+      }
+    }
+
+    it("add_sub_lui_auipc") {
+      val prog = Seq(
+        "12345537", // lui   x10, 0x12345      ; x10 = 0x12345000
+        "02a00093", // addi  x1,  x0, 42       ; x1  = 42
+        "fff00113", // addi  x2,  x0, -1       ; x2  = -1 (0xFFFFFFFF)
+        "002081b3", // add   x3,  x1, x2       ; 42 + (-1) = 41
+        "40208233", // sub   x4,  x1, x2       ; 42 - (-1) = 43
+        "00001597"  // auipc x11, 0x1          ; x11 = PC(0x14) + 0x1000 = 0x1014
+      )
+      val data = Seq("00000000")
+      run(prog, data, "add_sub_lui_auipc") { r =>
+        val exp = Map(
+          10 -> h("12345000"), // LUI
+          1  -> h("0000002A"), // ADDI +42
+          2  -> h("FFFFFFFF"), // ADDI -1
+          3  -> h("00000029"), // ADD
+          4  -> h("0000002B"), // SUB
+          11 -> h("00001014")  // AUIPC at PC=0x14
+        )
+        exp.foreach { case (i, v) =>
+          assert(r(i) == v, f"x$i = 0x${r(i)}%08x != 0x${v}%08x")
+        }
+      }
+    }
   }
 }

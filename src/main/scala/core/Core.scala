@@ -137,6 +137,11 @@ object Control {
   val Y = true.B
   val N = false.B
 
+  // A_sel
+  val A_XXX = 0.U(1.W)
+  val A_PC = 0.U(1.W)
+  val A_RS1 = 1.U(1.W)
+
   // B_sel
   val B_XXX = 0.U(1.W)
   val B_IMM = 0.U(1.W)
@@ -175,25 +180,39 @@ object Control {
 
   // B_sel  imm_sel  alu_op  st_type ld_type wb_sel wb_en
 
-  val default = List(B_XXX, IMM_X, ALU_XXX, ST_XXX, LD_XXX, WB_ALU, N)
+  val default = List(A_XXX, B_XXX, IMM_X, ALU_XXX, ST_XXX, LD_XXX, WB_ALU, N)
 
   val map = Array(
     // Loads
-    LB -> List(B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LB, WB_MEM, Y),
-    LH -> List(B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LH, WB_MEM, Y),
-    LW -> List(B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LW, WB_MEM, Y),
-    LBU -> List(B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LBU, WB_MEM, Y),
-    LHU -> List(B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LHU, WB_MEM, Y),
+    LB -> List(A_RS1, B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LB, WB_MEM, Y),
+    LH -> List(A_RS1, B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LH, WB_MEM, Y),
+    LW -> List(A_RS1, B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LW, WB_MEM, Y),
+    LBU -> List(A_RS1, B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LBU, WB_MEM, Y),
+    LHU -> List(A_RS1, B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LHU, WB_MEM, Y),
     // Stores
-    SB -> List(B_IMM, IMM_S, ALU_ADD, ST_SB, LD_XXX, WB_XXX, N),
-    SH -> List(B_IMM, IMM_S, ALU_ADD, ST_SH, LD_XXX, WB_XXX, N),
-    SW -> List(B_IMM, IMM_S, ALU_ADD, ST_SW, LD_XXX, WB_XXX, N),
+    SB -> List(A_RS1, B_IMM, IMM_S, ALU_ADD, ST_SB, LD_XXX, WB_XXX, N),
+    SH -> List(A_RS1, B_IMM, IMM_S, ALU_ADD, ST_SH, LD_XXX, WB_XXX, N),
+    SW -> List(A_RS1, B_IMM, IMM_S, ALU_ADD, ST_SW, LD_XXX, WB_XXX, N),
+    // Shifts
+    SLL -> List(A_RS1, B_RS2, IMM_X, ALU_SLL, ST_XXX, LD_XXX, WB_ALU, Y),
+    SLLI -> List(A_RS1, B_IMM, IMM_I, ALU_SLL, ST_XXX, LD_XXX, WB_ALU, Y),
+    SRL -> List(A_RS1, B_RS2, IMM_X, ALU_SRL, ST_XXX, LD_XXX, WB_ALU, Y),
+    SRLI -> List(A_RS1, B_IMM, IMM_I, ALU_SRL, ST_XXX, LD_XXX, WB_ALU, Y),
+    SRA -> List(A_RS1, B_RS2, IMM_X, ALU_SRA, ST_XXX, LD_XXX, WB_ALU, Y),
+    SRAI -> List(A_RS1, B_IMM, IMM_I, ALU_SRA, ST_XXX, LD_XXX, WB_ALU, Y),
+    // Arithmetic
+    ADD -> List(A_RS1, B_RS2, IMM_X, ALU_ADD, ST_XXX, LD_XXX, WB_ALU, Y),
+    ADDI -> List(A_RS1, B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_XXX, WB_ALU, Y),
+    SUB -> List(A_RS1, B_RS2, IMM_X, ALU_SUB, ST_XXX, LD_XXX, WB_ALU, Y),
+    LUI -> List(A_RS1, B_IMM, IMM_U, ALU_COPY_B, ST_XXX, LD_XXX, WB_ALU, Y),
+    AUIPC -> List(A_PC, B_IMM, IMM_U, ALU_ADD, ST_XXX, LD_XXX, WB_ALU, Y),
   )
 }
 
 class Control() extends Module {
   val io = IO(new Bundle {
     val inst = Input(UInt(32.W))
+    val A_sel = Output(UInt(1.W))
     val B_sel = Output(UInt(1.W))
     val imm_sel = Output(UInt(3.W))
     val alu_op = Output(UInt(4.W))
@@ -205,13 +224,14 @@ class Control() extends Module {
 
   val sig = ListLookup(io.inst, Control.default, Control.map)
 
-  io.B_sel := sig(0)
-  io.imm_sel := sig(1)
-  io.alu_op := sig(2)
-  io.st_type := sig(3)
-  io.ld_type := sig(4)
-  io.wb_sel := sig(5)
-  io.wb_en := sig(6)
+  io.A_sel := sig(0)
+  io.B_sel := sig(1)
+  io.imm_sel := sig(2)
+  io.alu_op := sig(3)
+  io.st_type := sig(4)
+  io.ld_type := sig(5)
+  io.wb_sel := sig(6)
+  io.wb_en := sig(7)
 }
 
 class ImmGen(val xlen: Int) extends Module {
@@ -236,37 +256,7 @@ class ImmGen(val xlen: Int) extends Module {
 }
 
 class Core(xlen: Int, hexPath: String, dataHexPath: Option[String]) extends Module {
-  val io = IO(new Bundle {
-    // Make logic observable to prevent DCE
-    val pc_out     = Output(UInt(xlen.W))
-    val inst_out   = Output(UInt(32.W))
-
-    // Decoder/execute signals (handy in waves)
-    val B_sel      = Output(UInt(1.W))
-    val imm_sel    = Output(UInt(3.W))
-    val alu_op     = Output(UInt(4.W))
-    val wb_sel     = Output(UInt(1.W))
-    val st_type    = Output(UInt(2.W))
-    val ld_type    = Output(UInt(3.W))
-    val wb_en      = Output(UInt(1.W))
-
-    // Writeback bus
-    val wb_wen     = Output(Bool())
-    val wb_waddr   = Output(UInt(5.W))
-    val wb_wdata   = Output(UInt(xlen.W))
-
-    // ALU / imm
-    val alu_A      = Output(UInt(xlen.W))
-    val alu_B      = Output(UInt(xlen.W))
-    val alu_out    = Output(UInt(xlen.W))
-    val imm_out    = Output(UInt(xlen.W))
-
-    // Memory interfaces for visibility
-    val imem_addr  = Output(UInt(xlen.W))
-    val imem_data  = Output(UInt(32.W))
-    val dmem_raddr = Output(UInt(xlen.W))
-    val dmem_rdata = Output(UInt(32.W))
-  })
+  val io = IO(new Bundle {})
 
   val pc      = RegInit(0.U(xlen.W))
   val imem    = Module(new IMem(xlen, 65536, Some(hexPath)))
@@ -300,8 +290,8 @@ class Core(xlen: Int, hexPath: String, dataHexPath: Option[String]) extends Modu
   regs.io.wdata  := Mux(control.io.wb_sel === Control.WB_ALU, alu.io.out, dmem.io.rdata)
 
   // ALU
-  alu.io.A      := regs.io.rdata1
-  alu.io.B      := Mux(control.io.B_sel === Control.B_IMM, immgen.io.out, regs.io.rdata2)
+  alu.io.A := Mux(control.io.A_sel === Control.A_RS1, regs.io.rdata1, pc)
+  alu.io.B := Mux(control.io.B_sel === Control.B_RS2, regs.io.rdata2, immgen.io.out)
   alu.io.alu_op := control.io.alu_op
 
   // Data memory
@@ -310,32 +300,6 @@ class Core(xlen: Int, hexPath: String, dataHexPath: Option[String]) extends Modu
   dmem.io.st_type := control.io.st_type
   dmem.io.waddr := alu.io.out
   dmem.io.wdata := regs.io.rdata2
-
-  // ---- Expose signals to anchor the design and for wave debug ----
-  io.pc_out     := pc
-  io.inst_out   := inst
-
-  io.B_sel      := control.io.B_sel
-  io.imm_sel    := control.io.imm_sel
-  io.alu_op     := control.io.alu_op
-  io.wb_sel     := control.io.wb_sel
-  io.st_type    := control.io.st_type
-  io.ld_type    := control.io.ld_type
-  io.wb_en      := control.io.wb_en
-
-  io.wb_wen     := regs.io.wen
-  io.wb_waddr   := regs.io.waddr
-  io.wb_wdata   := regs.io.wdata
-
-  io.alu_A      := alu.io.A
-  io.alu_B      := alu.io.B
-  io.alu_out    := alu.io.out
-  io.imm_out    := immgen.io.out
-
-  io.imem_addr  := imem.io.addr
-  io.imem_data  := imem.io.data
-  io.dmem_raddr := dmem.io.raddr
-  io.dmem_rdata := dmem.io.rdata
 
   // Keep a few intermediates from being swept even if unused later
   val opcode = inst(6, 0)
