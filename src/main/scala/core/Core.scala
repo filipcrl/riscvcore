@@ -5,6 +5,9 @@ import chisel3.util._
 import chisel3.util.experimental.BoringUtils
 import chisel3.util.experimental.loadMemoryFromFileInline
 import chisel3.experimental.hierarchy.{instantiable, public}
+import core.Control.{BR_BEQ => BR_BEQ}
+import core.Control.{BR_BNE => BR_BNE}
+import core.Control.{BR_BLT => BR_BLT}
 
 class IMem(xlen: Int, depthWords: Int = 65536, hexPath: Option[String] = None) extends Module {
   val io = IO(new Bundle {
@@ -156,10 +159,21 @@ object Control {
   val IMM_B = 5.U(3.W)
   val IMM_Z = 6.U(3.W)
 
+  // br_cond
+  val BR_XXX = 0.U(3.W)
+  val BR_BEQ = 1.U(3.W)
+  val BR_BNE = 2.U(3.W)
+  val BR_BLT = 3.U(3.W)
+  val BR_BGE = 4.U(3.W)
+  val BR_BLTU = 5.U(3.W)
+  val BR_BGEU = 6.U(3.W)
+  val BR_JUMP = 7.U(3.W)
+
   // wb_sel
-  val WB_XXX = 0.U(1.W)
-  val WB_ALU = 0.U(1.W)
-  val WB_MEM = 1.U(1.W)
+  val WB_XXX = 0.U(2.W)
+  val WB_ALU = 0.U(2.W)
+  val WB_MEM = 1.U(2.W)
+  val WB_PC4 = 2.U(2.W)
 
   // st_type
   val ST_XXX = 0.U(2.W)
@@ -178,34 +192,51 @@ object Control {
   import Alu._
   import Instructions._
 
-  // B_sel  imm_sel  alu_op  st_type ld_type wb_sel wb_en
+  // B_sel  imm_sel  alu_op  st_type ld_type wb_sel wb_en br_cond
 
-  val default = List(A_XXX, B_XXX, IMM_X, ALU_XXX, ST_XXX, LD_XXX, WB_ALU, N)
+  val default = List(A_XXX, B_XXX, IMM_X, ALU_XXX, ST_XXX, LD_XXX, WB_ALU, N, BR_XXX) 
 
   val map = Array(
     // Loads
-    LB -> List(A_RS1, B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LB, WB_MEM, Y),
-    LH -> List(A_RS1, B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LH, WB_MEM, Y),
-    LW -> List(A_RS1, B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LW, WB_MEM, Y),
-    LBU -> List(A_RS1, B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LBU, WB_MEM, Y),
-    LHU -> List(A_RS1, B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LHU, WB_MEM, Y),
+    LB -> List(A_RS1, B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LB, WB_MEM, Y, BR_XXX),
+    LH -> List(A_RS1, B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LH, WB_MEM, Y, BR_XXX),
+    LW -> List(A_RS1, B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LW, WB_MEM, Y, BR_XXX),
+    LBU -> List(A_RS1, B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LBU, WB_MEM, Y, BR_XXX),
+    LHU -> List(A_RS1, B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_LHU, WB_MEM, Y, BR_XXX),
     // Stores
-    SB -> List(A_RS1, B_IMM, IMM_S, ALU_ADD, ST_SB, LD_XXX, WB_XXX, N),
-    SH -> List(A_RS1, B_IMM, IMM_S, ALU_ADD, ST_SH, LD_XXX, WB_XXX, N),
-    SW -> List(A_RS1, B_IMM, IMM_S, ALU_ADD, ST_SW, LD_XXX, WB_XXX, N),
+    SB -> List(A_RS1, B_IMM, IMM_S, ALU_ADD, ST_SB, LD_XXX, WB_XXX, N, BR_XXX),
+    SH -> List(A_RS1, B_IMM, IMM_S, ALU_ADD, ST_SH, LD_XXX, WB_XXX, N, BR_XXX),
+    SW -> List(A_RS1, B_IMM, IMM_S, ALU_ADD, ST_SW, LD_XXX, WB_XXX, N, BR_XXX),
     // Shifts
-    SLL -> List(A_RS1, B_RS2, IMM_X, ALU_SLL, ST_XXX, LD_XXX, WB_ALU, Y),
-    SLLI -> List(A_RS1, B_IMM, IMM_I, ALU_SLL, ST_XXX, LD_XXX, WB_ALU, Y),
-    SRL -> List(A_RS1, B_RS2, IMM_X, ALU_SRL, ST_XXX, LD_XXX, WB_ALU, Y),
-    SRLI -> List(A_RS1, B_IMM, IMM_I, ALU_SRL, ST_XXX, LD_XXX, WB_ALU, Y),
-    SRA -> List(A_RS1, B_RS2, IMM_X, ALU_SRA, ST_XXX, LD_XXX, WB_ALU, Y),
-    SRAI -> List(A_RS1, B_IMM, IMM_I, ALU_SRA, ST_XXX, LD_XXX, WB_ALU, Y),
+    SLL -> List(A_RS1, B_RS2, IMM_X, ALU_SLL, ST_XXX, LD_XXX, WB_ALU, Y, BR_XXX),
+    SLLI -> List(A_RS1, B_IMM, IMM_I, ALU_SLL, ST_XXX, LD_XXX, WB_ALU, Y, BR_XXX),
+    SRL -> List(A_RS1, B_RS2, IMM_X, ALU_SRL, ST_XXX, LD_XXX, WB_ALU, Y, BR_XXX),
+    SRLI -> List(A_RS1, B_IMM, IMM_I, ALU_SRL, ST_XXX, LD_XXX, WB_ALU, Y, BR_XXX),
+    SRA -> List(A_RS1, B_RS2, IMM_X, ALU_SRA, ST_XXX, LD_XXX, WB_ALU, Y, BR_XXX),
+    SRAI -> List(A_RS1, B_IMM, IMM_I, ALU_SRA, ST_XXX, LD_XXX, WB_ALU, Y, BR_XXX),
     // Arithmetic
-    ADD -> List(A_RS1, B_RS2, IMM_X, ALU_ADD, ST_XXX, LD_XXX, WB_ALU, Y),
-    ADDI -> List(A_RS1, B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_XXX, WB_ALU, Y),
-    SUB -> List(A_RS1, B_RS2, IMM_X, ALU_SUB, ST_XXX, LD_XXX, WB_ALU, Y),
-    LUI -> List(A_RS1, B_IMM, IMM_U, ALU_COPY_B, ST_XXX, LD_XXX, WB_ALU, Y),
-    AUIPC -> List(A_PC, B_IMM, IMM_U, ALU_ADD, ST_XXX, LD_XXX, WB_ALU, Y),
+    ADD -> List(A_RS1, B_RS2, IMM_X, ALU_ADD, ST_XXX, LD_XXX, WB_ALU, Y, BR_XXX),
+    ADDI -> List(A_RS1, B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_XXX, WB_ALU, Y, BR_XXX),
+    SUB -> List(A_RS1, B_RS2, IMM_X, ALU_SUB, ST_XXX, LD_XXX, WB_ALU, Y, BR_XXX),
+    LUI -> List(A_RS1, B_IMM, IMM_U, ALU_COPY_B, ST_XXX, LD_XXX, WB_ALU, Y, BR_XXX),
+    AUIPC -> List(A_PC, B_IMM, IMM_U, ALU_ADD, ST_XXX, LD_XXX, WB_ALU, Y, BR_XXX),
+    // Logical
+    XOR -> List(A_RS1, B_RS2, IMM_X, ALU_XOR, ST_XXX, LD_XXX, WB_ALU, Y, BR_XXX),
+    XORI -> List(A_RS1, B_IMM, IMM_I, ALU_XOR, ST_XXX, LD_XXX, WB_ALU, Y, BR_XXX),
+    OR -> List(A_RS1, B_RS2, IMM_X, ALU_OR, ST_XXX, LD_XXX, WB_ALU, Y, BR_XXX),
+    ORI -> List(A_RS1, B_IMM, IMM_I, ALU_OR, ST_XXX, LD_XXX, WB_ALU, Y, BR_XXX),
+    AND -> List(A_RS1, B_RS2, IMM_X, ALU_AND, ST_XXX, LD_XXX, WB_ALU, Y, BR_XXX),
+    ANDI -> List(A_RS1, B_IMM, IMM_I, ALU_AND, ST_XXX, LD_XXX, WB_ALU, Y, BR_XXX),
+    // Branches
+    BEQ -> List(A_PC, B_IMM, IMM_B, ALU_ADD, ST_XXX, LD_XXX, WB_XXX, N, BR_BEQ),
+    BNE -> List(A_PC, B_IMM, IMM_B, ALU_ADD, ST_XXX, LD_XXX, WB_XXX, N, BR_BNE),
+    BLT -> List(A_PC, B_IMM, IMM_B, ALU_ADD, ST_XXX, LD_XXX, WB_XXX, N, BR_BLT),
+    BGE -> List(A_PC, B_IMM, IMM_B, ALU_ADD, ST_XXX, LD_XXX, WB_XXX, N, BR_BGE),
+    BLTU -> List(A_PC, B_IMM, IMM_B, ALU_ADD, ST_XXX, LD_XXX, WB_XXX, N, BR_BLTU),
+    BGEU -> List(A_PC, B_IMM, IMM_B, ALU_ADD, ST_XXX, LD_XXX, WB_XXX, N, BR_BGEU),
+    // Jump & Link
+    JAL -> List(A_PC, B_IMM, IMM_J, ALU_ADD, ST_XXX, LD_XXX, WB_PC4, Y, BR_JUMP),
+    JALR -> List(A_RS1, B_IMM, IMM_I, ALU_ADD, ST_XXX, LD_XXX, WB_PC4, Y, BR_JUMP)
   )
 }
 
@@ -216,10 +247,11 @@ class Control() extends Module {
     val B_sel = Output(UInt(1.W))
     val imm_sel = Output(UInt(3.W))
     val alu_op = Output(UInt(4.W))
-    val wb_sel = Output(UInt(1.W))
+    val wb_sel = Output(UInt(2.W))
     val st_type = Output(UInt(2.W))
     val ld_type = Output(UInt(3.W))
     val wb_en = Output(UInt(1.W))
+    val br_cond = Output(UInt(3.W))
   })
 
   val sig = ListLookup(io.inst, Control.default, Control.map)
@@ -232,6 +264,28 @@ class Control() extends Module {
   io.ld_type := sig(5)
   io.wb_sel := sig(6)
   io.wb_en := sig(7)
+  io.br_cond := sig(8)
+}
+
+class BrCond(val xlen: Int) extends Module {
+  val io = IO(new Bundle {
+    val br_cond = Input(UInt(3.W))
+    val A = Input(UInt(xlen.W))
+    val B = Input(UInt(xlen.W))
+    val enbl = Output(Bool())
+  })
+
+  import Control._
+
+  io.enbl := MuxLookup(io.br_cond, false.B)(Seq(
+    BR_BEQ -> (io.A === io.B),
+    BR_BNE -> (io.A =/= io.B),
+    BR_BLT -> (io.A.asSInt < io.B.asSInt),
+    BR_BGE -> (io.A.asSInt >= io.B.asSInt),
+    BR_BLTU -> (io.A < io.B),
+    BR_BGEU -> (io.A >= io.B),
+    BR_JUMP -> true.B,
+  ))
 }
 
 class ImmGen(val xlen: Int) extends Module {
@@ -265,9 +319,9 @@ class Core(xlen: Int, hexPath: String, dataHexPath: Option[String]) extends Modu
   val alu     = Module(new Alu(xlen))
   val regs    = Module(new RegFile(xlen))
   val immgen  = Module(new ImmGen(xlen))
+  val brcond  = Module(new BrCond(xlen))
 
-  // Simple fetch: advance PC each cycle
-  pc := pc + 4.U
+  pc := Mux(brcond.io.enbl, Cat(alu.io.out(alu.io.out.getWidth-1, 1), 0.U(1.W)), pc + 4.U)
   imem.io.addr := pc
 
   val inst  = imem.io.data
@@ -275,33 +329,36 @@ class Core(xlen: Int, hexPath: String, dataHexPath: Option[String]) extends Modu
   val rs1   = inst(19, 15)
   val rs2   = inst(24, 20)
 
-  // Drive decoder
+  brcond.io.br_cond := control.io.br_cond
+  brcond.io.A := regs.io.rdata1
+  brcond.io.B := regs.io.rdata2
+
   control.io.inst := inst
 
-  // Immediate gen
   immgen.io.inst := inst
   immgen.io.sel  := control.io.imm_sel
 
-  // Register file
   regs.io.raddr1 := rs1
   regs.io.raddr2 := rs2
   regs.io.wen    := control.io.wb_en
   regs.io.waddr  := rd
-  regs.io.wdata  := Mux(control.io.wb_sel === Control.WB_ALU, alu.io.out, dmem.io.rdata)
 
-  // ALU
+  regs.io.wdata := MuxLookup(control.io.wb_sel, 0.U)(Seq(
+    Control.WB_ALU -> alu.io.out,
+    Control.WB_MEM -> dmem.io.rdata,
+    Control.WB_PC4 -> (pc + 4.U),
+  ))
+
   alu.io.A := Mux(control.io.A_sel === Control.A_RS1, regs.io.rdata1, pc)
   alu.io.B := Mux(control.io.B_sel === Control.B_RS2, regs.io.rdata2, immgen.io.out)
   alu.io.alu_op := control.io.alu_op
 
-  // Data memory
   dmem.io.raddr   := alu.io.out
   dmem.io.ld_type := control.io.ld_type
   dmem.io.st_type := control.io.st_type
   dmem.io.waddr := alu.io.out
   dmem.io.wdata := regs.io.rdata2
 
-  // Keep a few intermediates from being swept even if unused later
   val opcode = inst(6, 0)
   val func3  = inst(14, 12)
   dontTouch(opcode); dontTouch(func3)
