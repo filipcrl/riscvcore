@@ -8,6 +8,9 @@ import chisel3.experimental.hierarchy.{instantiable, public}
 import core.Control.{BR_BEQ => BR_BEQ}
 import core.Control.{BR_BNE => BR_BNE}
 import core.Control.{BR_BLT => BR_BLT}
+import core.Control.ldSize
+import core.Control.loadExtend
+import core.Control.stMask
 
 class IMem(xlen: Int, depthWords: Int = 65536, hexPath: Option[String] = None) extends Module {
   val io = IO(new Bundle {
@@ -181,6 +184,12 @@ object Control {
   val ST_SH = 2.U(2.W)
   val ST_SB = 3.U(2.W)
 
+  def stMask(st: UInt, addr: UInt): UInt = MuxLookup(st, 0.U(4.W))(Seq(
+    Control.ST_SB -> UIntToOH(addr(1,0), 4),
+    Control.ST_SH -> Mux(addr(1), "b1100".U, "b0011".U),
+    Control.ST_SW -> "b1111".U
+  ))
+
   // ld_type
   val LD_XXX = 0.U(3.W)
   val LD_LW = 1.U(3.W)
@@ -188,6 +197,24 @@ object Control {
   val LD_LB = 3.U(3.W)
   val LD_LHU = 4.U(3.W)
   val LD_LBU = 5.U(3.W)
+
+  def ldSize(ld: UInt): UInt = MuxLookup(ld, 2.U)(Seq(
+    Control.LD_LB  -> 0.U, Control.LD_LBU -> 0.U,
+    Control.LD_LH  -> 1.U, Control.LD_LHU -> 1.U,
+    Control.LD_LW  -> 2.U
+  ))
+
+  def loadExtend(ld: UInt, addr: UInt, rdata: UInt): UInt = {
+    val byte = ((rdata >> (addr(1,0) << 3)).asUInt)(7,0)
+    val half = Mux(addr(1), rdata(31,16), rdata(15,0))
+    MuxLookup(ld, rdata)(Seq(
+      Control.LD_LB  -> byte.asSInt.pad(32).asUInt,
+      Control.LD_LBU -> byte.zext.asUInt,
+      Control.LD_LH  -> half.asSInt.pad(32).asUInt,
+      Control.LD_LHU -> half.zext.asUInt,
+      Control.LD_LW  -> rdata
+    ))
+  }
 
   import Alu._
   import Instructions._
@@ -309,60 +336,135 @@ class ImmGen(val xlen: Int) extends Module {
   ).asUInt
 }
 
+/* Memory interface */
+class MemReq(xlen: Int) extends Bundle {
+  val addr = UInt(xlen.W)
+  val wdata = UInt(xlen.W)
+  val wstrb = UInt((xlen/8).W)
+  val size = UInt(2.W)
+}
+
+class MemPort(xlen: Int) extends Bundle {
+  val req = Decoupled(new MemReq(xlen))
+  val resp = Flipped(Decoupled(UInt(xlen.W)))
+}
+
 class Core(xlen: Int, hexPath: String, dataHexPath: Option[String]) extends Module {
-  val io = IO(new Bundle {})
+  val io = IO(new Bundle {
+    val imem = new MemPort(xlen)
+    val dmem = new MemPort(xlen)
+  })
 
-  val pc      = RegInit(0.U(xlen.W))
-  val imem    = Module(new IMem(xlen, 65536, Some(hexPath)))
-  val dmem    = Module(new DMem(xlen, 65536, dataHexPath))
+  // State
+  val pc = RegInit(0.U(xlen.W))
+  val inst = RegInit(0.U(32.W))
+
   val control = Module(new Control())
-  val alu     = Module(new Alu(xlen))
-  val regs    = Module(new RegFile(xlen))
-  val immgen  = Module(new ImmGen(xlen))
-  val brcond  = Module(new BrCond(xlen))
+  val alu = Module(new Alu(xlen))
+  val regs = Module(new RegFile(xlen))
+  val immgen = Module(new ImmGen(xlen))
+  val brcond = Module(new BrCond(xlen))
 
-  pc := Mux(brcond.io.enbl, Cat(alu.io.out(alu.io.out.getWidth-1, 1), 0.U(1.W)), pc + 4.U)
-  imem.io.addr := pc
-
-  val inst  = imem.io.data
-  val rd    = inst(11, 7)
-  val rs1   = inst(19, 15)
-  val rs2   = inst(24, 20)
-
-  brcond.io.br_cond := control.io.br_cond
-  brcond.io.A := regs.io.rdata1
-  brcond.io.B := regs.io.rdata2
-
-  control.io.inst := inst
+  val rd  = inst(11, 7)
+  val rs1 = inst(19, 15)
+  val rs2 = inst(24, 20)
 
   immgen.io.inst := inst
-  immgen.io.sel  := control.io.imm_sel
+  control.io.inst := inst
+
+  immgen.io.sel := control.io.imm_sel
 
   regs.io.raddr1 := rs1
   regs.io.raddr2 := rs2
-  regs.io.wen    := control.io.wb_en
-  regs.io.waddr  := rd
-
-  regs.io.wdata := MuxLookup(control.io.wb_sel, 0.U)(Seq(
-    Control.WB_ALU -> alu.io.out,
-    Control.WB_MEM -> dmem.io.rdata,
-    Control.WB_PC4 -> (pc + 4.U),
-  ))
 
   alu.io.A := Mux(control.io.A_sel === Control.A_RS1, regs.io.rdata1, pc)
   alu.io.B := Mux(control.io.B_sel === Control.B_RS2, regs.io.rdata2, immgen.io.out)
   alu.io.alu_op := control.io.alu_op
 
-  dmem.io.raddr   := alu.io.out
-  dmem.io.ld_type := control.io.ld_type
-  dmem.io.st_type := control.io.st_type
-  dmem.io.waddr := alu.io.out
-  dmem.io.wdata := regs.io.rdata2
+  brcond.io.br_cond := control.io.br_cond
+  brcond.io.A := regs.io.rdata1
+  brcond.io.B := regs.io.rdata2
 
-  val opcode = inst(6, 0)
-  val func3  = inst(14, 12)
-  dontTouch(opcode); dontTouch(func3)
-  dontTouch(rd); dontTouch(rs1); dontTouch(rs2)
+  // Defaults
+  regs.io.wen := false.B
+  regs.io.waddr := rd
+  regs.io.wdata := 0.U
+
+  io.imem.req.valid := false.B
+  io.imem.req.bits.addr  := pc
+  io.imem.req.bits.wdata := 0.U
+  io.imem.req.bits.wstrb := 0.U
+  io.imem.req.bits.size  := 2.U
+
+  io.imem.resp.ready := false.B
+
+  io.dmem.req.valid := false.B
+  io.dmem.req.bits.addr  := alu.io.out
+  io.dmem.req.bits.wdata := regs.io.rdata2
+  io.dmem.req.bits.wstrb := 0.U
+  io.dmem.req.bits.size  := 2.U
+  io.dmem.resp.ready := false.B
+
+  // State Machine
+  val sFetch :: sWaitI :: sExec :: sIssueLoad :: sWaitLoad :: sIssueStore :: Nil = Enum(6)
+  val state = RegInit(sFetch)
+
+  val nextPc = Mux(brcond.io.enbl, Cat(alu.io.out(alu.io.out.getWidth-1, 1), 0.U(1.W)), pc + 4.U)
+
+  switch (state) {
+    is(sFetch) {
+      io.imem.req.valid := true.B
+      when(io.imem.req.fire) { state := sWaitI }
+    }
+    is (sWaitI) {
+      io.imem.resp.ready := true.B
+      when (io.imem.resp.fire) {
+        inst := io.imem.resp.bits
+        state := sExec
+      }
+    }
+    is (sExec) {
+      when(control.io.ld_type =/= Control.LD_XXX) {
+        state := sIssueLoad
+      }.elsewhen(control.io.st_type =/= Control.ST_XXX) {
+        state := sIssueStore
+      }.elsewhen(control.io.wb_en.asBool) {
+        regs.io.wen := true.B
+        regs.io.wdata := MuxLookup(control.io.wb_sel, 0.U)(Seq(
+          Control.WB_ALU -> alu.io.out,
+          Control.WB_PC4 -> (pc + 4.U)
+        ))
+        pc := nextPc
+      }
+    }
+    is (sIssueLoad) {
+      io.dmem.req.valid := true.B
+      io.dmem.req.bits.size := ldSize(control.io.ld_type)
+      when (io.dmem.req.fire) { state := sIssueLoad }
+    }
+    is (sWaitLoad) {
+      io.dmem.resp.ready := true.B
+      when (io.dmem.resp.fire) {
+        when(control.io.wb_en.asBool) {
+          regs.io.wen := true.B
+          regs.io.wdata := loadExtend(control.io.ld_type, alu.io.out, io.dmem.resp.bits)
+        }
+        pc := nextPc
+        state := sFetch
+      }
+    }
+    is(sIssueStore) {
+      io.dmem.req.valid := true.B
+      io.dmem.req.bits.wstrb := stMask(control.io.st_type, alu.io.out)
+      io.dmem.req.bits.size := MuxLookup(control.io.st_type, 2.U)(Seq(
+        Control.ST_SB -> 0.U, Control.ST_SH -> 1.U, Control.ST_SW -> 2.U
+      ))
+      when (io.dmem.req.fire) {
+        pc := nextPc
+        state := sFetch
+      }
+    }
+  }
 }
 
 class CoreWithTaps(xlen: Int, hexPath: String, dataHexPath: Option[String])
