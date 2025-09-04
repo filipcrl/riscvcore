@@ -19,7 +19,7 @@ class MemPort(xlen: Int) extends Bundle {
 class ArbiterReq() extends Bundle {
   val addr  = UInt(32.W)
   val wdata = UInt(512.W) // for line ops; for beat ops, use bits(63,0)
-  val wstrb = UInt(8.W)   // for beat writes only
+  val wstrb = UInt(64.W)   // for 512-bit beat writes
   val wen   = Bool()      // 1=write, 0=read
   val isLine = Bool()     // 1=line (8-beat) op, 0=single beat
 }
@@ -155,20 +155,21 @@ class Cache(xlen: Int, cfg: CacheConfig = CacheConfig(), readOnly: Boolean = fal
   }
 
   if (!readOnly) {
-    def byteOffset(addr: UInt) = addr(2,0)
-    val byteOff = byteOffset(reqAddr)
-    val wdata64 = (reqWdata.asUInt << (byteOff << 3)).asUInt
-    val bytes = (1.U << reqSize).asUInt // 1,2,4
-    val ones = ((1.U(9.W) << bytes) - 1.U)(7,0)
-    val strobeMask = ((ones << byteOff)(7,0))
+    // Compute 512-bit aligned write data and 64-bit strobe for beat writes
+    val byteOff64  = reqAddr(5,0) // 0..63 within 512-bit beat
+    val wdata512   = (reqWdata.asUInt << (byteOff64 << 3)).asUInt
+    val bytes      = (1.U << reqSize).asUInt // 1,2,4
+    val ones64wide = ((1.U(65.W) << bytes) - 1.U)(63,0)
+    val strobeMask = ((ones64wide << byteOff64)(63,0))
 
     switch(state) {
       is(sWriteReq) {
+        // Forward 1-beat 512b write to AXI (partial via WSTRB)
         io.arb.req.valid := true.B
-        io.arb.req.bits.addr := Cat(reqAddr(cfg.addrBits-1, 3), 0.U(3.W))
+        io.arb.req.bits.addr := Cat(reqAddr(cfg.addrBits-1, 6), 0.U(6.W))
         io.arb.req.bits.wen := true.B
         io.arb.req.bits.isLine := false.B
-        io.arb.req.bits.wdata := wdata64.pad(512)
+        io.arb.req.bits.wdata := wdata512
         io.arb.req.bits.wstrb := strobeMask
         when(io.arb.req.fire) { state := sWriteWait }
       }
@@ -177,14 +178,18 @@ class Cache(xlen: Int, cfg: CacheConfig = CacheConfig(), readOnly: Boolean = fal
         when(io.arb.resp.fire) { state := sWriteAck }
       }
       is(sWriteAck) {
+        // Update cache line on hit only
         when(hitReg) {
           val idx = idxOf(reqAddr)
           val b = beatOf(reqAddr)
           val oldBeat = lines(idx).data(b)
+          val beatByteOff = reqAddr(5,3) // which 64b slot
+          val localWdata64 = (wdata512 >> (beatByteOff << 6))(63,0)
+          val localStrobe8 = (strobeMask >> (beatByteOff << 3))(7,0)
           val bytesVec = Wire(Vec(8, UInt(8.W)))
           for (i <- 0 until 8) {
-            val sel = strobeMask(i)
-            val wbyte = wdata64(8*i+7, 8*i)
+            val sel = localStrobe8(i)
+            val wbyte = localWdata64(8*i+7, 8*i)
             val obyte = oldBeat(8*i+7, 8*i)
             bytesVec(i) := Mux(sel, wbyte, obyte)
           }
@@ -196,9 +201,9 @@ class Cache(xlen: Int, cfg: CacheConfig = CacheConfig(), readOnly: Boolean = fal
   }
 }
 
-class AxiArbiter(nPorts: Int, addrBits: Int = 32, idBits: Int = 4, dataBits: Int = 64) extends Module {
+class AxiArbiter(nPorts: Int, addrBits: Int = 32, idBits: Int = 4, dataBits: Int = 512) extends Module {
   require(nPorts > 0)
-  require(dataBits == 64, "Arbiter is currently tuned for 64-bit AXI datapath")
+  require(dataBits == 512, "Arbiter is tuned for 512-bit AXI datapath")
 
   val io = IO(new Bundle {
     val in  = Vec(nPorts, Flipped(new ArbiterPort()))
@@ -208,8 +213,8 @@ class AxiArbiter(nPorts: Int, addrBits: Int = 32, idBits: Int = 4, dataBits: Int
   // Defaults
   io.axi.writeAddr.valid := false.B
   io.axi.writeAddr.bits.addr  := 0.U
-  io.axi.writeAddr.bits.size  := (log2Ceil(dataBits/8)).U
-  io.axi.writeAddr.bits.len   := 7.U // 8 beats
+  io.axi.writeAddr.bits.size  := (log2Ceil(dataBits/8)).U // 6 for 512b
+  io.axi.writeAddr.bits.len   := 0.U // single beat
   io.axi.writeAddr.bits.burst := 1.U // INCR
   io.axi.writeAddr.bits.id    := 0.U
   io.axi.writeAddr.bits.lock  := 0.U
@@ -227,7 +232,7 @@ class AxiArbiter(nPorts: Int, addrBits: Int = 32, idBits: Int = 4, dataBits: Int
   io.axi.readAddr.valid := false.B
   io.axi.readAddr.bits.addr  := 0.U
   io.axi.readAddr.bits.size  := (log2Ceil(dataBits/8)).U
-  io.axi.readAddr.bits.len   := 7.U // 8 beats
+  io.axi.readAddr.bits.len   := 0.U // single 512b beat
   io.axi.readAddr.bits.burst := 1.U // INCR
   io.axi.readAddr.bits.id    := 0.U
   io.axi.readAddr.bits.lock  := 0.U
@@ -249,11 +254,11 @@ class AxiArbiter(nPorts: Int, addrBits: Int = 32, idBits: Int = 4, dataBits: Int
   val isWrite  = RegInit(false.B)
   val isLineOp = RegInit(false.B)
   val addrReg  = RegInit(0.U(addrBits.W))
-  val beatCnt  = RegInit(0.U(3.W)) // 0..7
-  val wstrbReg = RegInit(0.U(8.W))
+  val beatCnt  = RegInit(0.U(3.W)) // unused for 512b single-beat
+  val wstrbReg = RegInit(0.U((dataBits/8).W))
 
-  val wlineVec = Reg(Vec(8, UInt(dataBits.W)))
-  val rlineVec = Reg(Vec(8, UInt(dataBits.W)))
+  val wlineReg = Reg(UInt(dataBits.W))
+  val rlineReg = Reg(UInt(dataBits.W))
 
   val sIdle :: sWriteAddr :: sWriteBeats :: sWriteResp :: sWriteDone :: sReadAddr :: sReadBeats :: sReadResp :: Nil = Enum(8)
   val state = RegInit(sIdle)
@@ -274,20 +279,12 @@ class AxiArbiter(nPorts: Int, addrBits: Int = 32, idBits: Int = 4, dataBits: Int
           curPort  := i
           isWrite  := io.in(i).req.bits.wen
           isLineOp := io.in(i).req.bits.isLine
-          // Address: for line ops, align to 64B; for beat ops, 8B alignment
-          addrReg  := Mux(io.in(i).req.bits.isLine,
-                          Cat(io.in(i).req.bits.addr(addrBits-1, 6), 0.U(6.W)),
-                          Cat(io.in(i).req.bits.addr(addrBits-1, 3), 0.U(3.W)))
-          // Capture write data
-          val line = io.in(i).req.bits.wdata
-          for (b <- 0 until 8) {
-            val lo = b * dataBits
-            val hi = lo + dataBits - 1
-            wlineVec(b) := line(hi, lo)
-          }
+          // Address: align to 64B beat
+          addrReg  := Cat(io.in(i).req.bits.addr(addrBits-1, 6), 0.U(6.W))
+          // Capture write data (full 512b)
+          wlineReg := io.in(i).req.bits.wdata
           // Beat strobe for beat write
           wstrbReg := io.in(i).req.bits.wstrb
-          beatCnt := 0.U
           state := Mux(io.in(i).req.bits.wen, sWriteAddr, sReadAddr)
         }
       }
@@ -298,20 +295,16 @@ class AxiArbiter(nPorts: Int, addrBits: Int = 32, idBits: Int = 4, dataBits: Int
       io.axi.writeAddr.valid := true.B
       io.axi.writeAddr.bits.addr := addrReg
       io.axi.writeAddr.bits.id   := curPort
-      io.axi.writeAddr.bits.len  := Mux(isLineOp, 7.U, 0.U)
       when(io.axi.writeAddr.fire) {
         state := sWriteBeats
       }
     }
     is(sWriteBeats) {
       io.axi.writeData.valid := true.B
-      io.axi.writeData.bits.data := wlineVec(beatCnt)
-      io.axi.writeData.bits.strb := Mux(isLineOp, Fill(dataBits/8, 1.U(1.W)), wstrbReg)
-      io.axi.writeData.bits.last := Mux(isLineOp, (beatCnt === 7.U), true.B)
-      when(io.axi.writeData.fire) {
-        when(Mux(isLineOp, beatCnt === 7.U, true.B)) { state := sWriteResp }
-        beatCnt := beatCnt + 1.U
-      }
+      io.axi.writeData.bits.data := wlineReg
+      io.axi.writeData.bits.strb := wstrbReg
+      io.axi.writeData.bits.last := true.B
+      when(io.axi.writeData.fire) { state := sWriteResp }
     }
     is(sWriteResp) {
       io.axi.writeResp.ready := true.B
@@ -328,23 +321,19 @@ class AxiArbiter(nPorts: Int, addrBits: Int = 32, idBits: Int = 4, dataBits: Int
       io.axi.readAddr.valid := true.B
       io.axi.readAddr.bits.addr := addrReg
       io.axi.readAddr.bits.id   := curPort
-      when(io.axi.readAddr.fire) {
-        beatCnt := 0.U
-        state := sReadBeats
-      }
+      when(io.axi.readAddr.fire) { state := sReadBeats }
     }
     is(sReadBeats) {
       io.axi.readData.ready := true.B
       when(io.axi.readData.fire) {
-        rlineVec(beatCnt) := io.axi.readData.bits.data
-        when(beatCnt === 7.U && io.axi.readData.bits.last) { state := sReadResp }
-        beatCnt := beatCnt + 1.U
+        rlineReg := io.axi.readData.bits.data
+        when(io.axi.readData.bits.last) { state := sReadResp }
       }
     }
     is(sReadResp) {
-      // Concatenate beats into a 512b line, LSB = first beat
+      // Return the 512b line
       io.in(curPort).resp.valid := true.B
-      io.in(curPort).resp.bits := Cat(rlineVec.reverse)
+      io.in(curPort).resp.bits := rlineReg
       when(io.in(curPort).resp.fire) { state := sIdle }
     }
   }

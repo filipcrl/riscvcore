@@ -32,13 +32,13 @@ import chisel3.util.experimental.loadMemoryFromFileInline
 
 class Top(xlen: Int, sets: Int = 64) extends Module {
   val io = IO(new Bundle {
-    val axi = new AXIMasterIO(32, 64, 4)
+    val axi = new AXIMasterIO(32, 512, 4)
   })
 
   val core = Module(new Core(xlen, "", None))
   val ic   = Module(new Cache(xlen, CacheConfig(32, 64, 512, sets), readOnly = true))
   val dc   = Module(new Cache(xlen, CacheConfig(32, 64, 512, sets)))
-  val arb  = Module(new AxiArbiter(2, addrBits = 32, idBits = 4, dataBits = 64))
+  val arb  = Module(new AxiArbiter(2, addrBits = 32, idBits = 4, dataBits = 512))
 
   // Connect core to caches
   ic.io.mem <> core.io.imem
@@ -55,13 +55,13 @@ class Top(xlen: Int, sets: Int = 64) extends Module {
 // Simple AXI memory model with separate banks for I$ (id=0) and D$ (id=1)
 class AxiSimpleMem(
   addrBits: Int = 32,
-  dataBits: Int = 64,
+  dataBits: Int = 512,
   idBits: Int = 4,
   depthWords: Int = 65536,
   progHex: Option[String] = None,
   dataHex: Option[String] = None
 ) extends Module {
-  require(dataBits == 64)
+  require(dataBits == 512)
 
   val io = IO(new Bundle {
     val axi = Flipped(new AXIMasterIO(addrBits, dataBits, idBits))
@@ -72,7 +72,7 @@ class AxiSimpleMem(
   progHex.foreach(p => loadMemoryFromFileInline(imem, p))
   dataHex.foreach(p => loadMemoryFromFileInline(dmem, p))
 
-  // Write path
+  // Write path (single 512-bit beat)
   val wActive = RegInit(false.B)
   val wAddr   = RegInit(0.U(addrBits.W))
   val wId     = RegInit(0.U(idBits.W))
@@ -92,26 +92,22 @@ class AxiSimpleMem(
 
   io.axi.writeData.ready := wActive
   when(io.axi.writeData.fire) {
-    val baseWord = (wAddr >> 2).asUInt + (wCount << 1)
-    val lowW  = io.axi.writeData.bits.data(31,0)
-    val highW = io.axi.writeData.bits.data(63,32)
-    val strb  = io.axi.writeData.bits.strb
+    val baseWord = (wAddr >> 2).asUInt // 32-bit words
+    val data512 = io.axi.writeData.bits.data
+    val strb64  = io.axi.writeData.bits.strb
 
-    val lowVec  = VecInit.tabulate(4)(i => lowW(8*i+7, 8*i))
-    val highVec = VecInit.tabulate(4)(i => highW(8*i+7, 8*i))
-    val maskLow  = VecInit.tabulate(4)(i => strb(i))
-    val maskHigh = VecInit.tabulate(4)(i => strb(4+i))
-
-    when(wBankIsD) {
-      dmem.write(baseWord,      lowVec,  maskLow)
-      dmem.write(baseWord + 1.U, highVec, maskHigh)
-    }.otherwise {
-      imem.write(baseWord,      lowVec,  maskLow)
-      imem.write(baseWord + 1.U, highVec, maskHigh)
+    // Write 16 words (4 bytes each)
+    for (j <- 0 until 16) {
+      val wordBytes = VecInit.tabulate(4)(k => data512(32*j + 8*k + 7, 32*j + 8*k))
+      val mask4     = VecInit.tabulate(4)(k => strb64(4*j + k))
+      when(wBankIsD) {
+        dmem.write(baseWord + j.U, wordBytes, mask4)
+      }.otherwise {
+        imem.write(baseWord + j.U, wordBytes, mask4)
+      }
     }
 
-    wCount := wCount + 1.U
-    when(io.axi.writeData.bits.last) { wActive := false.B }
+    wActive := false.B // single beat
   }
 
   val bValid = RegInit(false.B)
@@ -121,7 +117,7 @@ class AxiSimpleMem(
   when(io.axi.writeResp.fire) { bValid := false.B }
   when(!wActive && (wLen === 0.U)) { bValid := true.B }
 
-  // Read path
+  // Read path (single 512-bit beat)
   val rActive = RegInit(false.B)
   val rAddr   = RegInit(0.U(addrBits.W))
   val rId     = RegInit(0.U(idBits.W))
@@ -138,28 +134,27 @@ class AxiSimpleMem(
   }
 
   val rBankIsD = (rId =/= 0.U)
-  val curWordIndex = (rAddr >> 2).asUInt + (rCount << 1)
-  val lowVec  = Mux(rBankIsD, dmem.read(curWordIndex),     imem.read(curWordIndex))
-  val highVec = Mux(rBankIsD, dmem.read(curWordIndex + 1.U), imem.read(curWordIndex + 1.U))
-  val lowWord  = Cat(lowVec.reverse)
-  val highWord = Cat(highVec.reverse)
-  val rDataBeat = Cat(highWord, lowWord)
+  val baseWordR = (rAddr >> 2).asUInt
+  // Build 512b line from 16x32b words (little endian packing)
+  val words = Wire(Vec(16, UInt(32.W)))
+  for (j <- 0 until 16) {
+    val vec4 = Mux(rBankIsD, dmem.read(baseWordR + j.U), imem.read(baseWordR + j.U))
+    words(j) := Cat(vec4.reverse)
+  }
+  val rDataBeat = Cat(words.reverse)
 
   io.axi.readData.valid := rActive
   io.axi.readData.bits.id   := rId
   io.axi.readData.bits.data := rDataBeat
   io.axi.readData.bits.resp := 0.U
-  io.axi.readData.bits.last := (rCount === rLen)
-  when(io.axi.readData.fire) {
-    rCount := rCount + 1.U
-    when(io.axi.readData.bits.last) { rActive := false.B }
-  }
+  io.axi.readData.bits.last := true.B
+  when(io.axi.readData.fire) { rActive := false.B }
 }
 
 // Test harness: Top + AxiSimpleMem and register taps
 class TopWithMem(xlen: Int, progHex: String, dataHex: Option[String], sets: Int = 64) extends Module {
   val top = Module(new Top(xlen, sets))
-  val mem = Module(new AxiSimpleMem(32, 64, 4, depthWords = 65536, progHex = Some(progHex), dataHex = dataHex))
+  val mem = Module(new AxiSimpleMem(32, 512, 4, depthWords = 65536, progHex = Some(progHex), dataHex = dataHex))
   mem.io.axi <> top.io.axi
 
   val regsTap = IO(Output(Vec(32, UInt(xlen.W))))
