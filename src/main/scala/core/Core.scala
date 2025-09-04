@@ -12,67 +12,6 @@ import core.Control.ldSize
 import core.Control.loadExtend
 import core.Control.stMask
 
-class IMem(xlen: Int, depthWords: Int = 65536, hexPath: Option[String] = None) extends Module {
-  val io = IO(new Bundle {
-    val addr = Input(UInt(xlen.W))
-    val data = Output(UInt(32.W))
-  })
-
-  val mem = Mem(depthWords, UInt(32.W))
-  io.data := mem(io.addr >> 2)
-
-  hexPath.foreach(p => loadMemoryFromFileInline(mem, p))
-}
-
-class DMem(xlen: Int, depthWords: Int = 65536, hexPath: Option[String] = None) extends Module {
-  val io = IO(new Bundle {
-    val raddr = Input(UInt(xlen.W))
-    val ld_type = Input(UInt(3.W))
-    val rdata = Output(UInt(32.W))
-    val waddr = Input(UInt(xlen.W))
-    val st_type = Input(UInt(2.W))
-    val wdata = Input(UInt(32.W))
-  })
-
-  val mem = Mem(depthWords, Vec(4, UInt(8.W)))
-  hexPath.foreach(p => loadMemoryFromFileInline(mem, p))
-
-  import Control._
-
-  val line  = mem(io.raddr >> 2)
-  val rByte = Mux1H(UIntToOH(io.raddr(1,0), 4), line)
-  val rHalf = Mux(io.raddr(1), Cat(line(3), line(2)), Cat(line(1), line(0)))
-  val rWord = Cat(line.reverse)
-
-  io.rdata := MuxLookup(io.ld_type, 0.U)(Seq(
-    LD_LB  -> rByte.asSInt.pad(32).asUInt,
-    LD_LBU -> rByte.pad(32),
-    LD_LH  -> rHalf.asSInt.pad(32).asUInt,
-    LD_LHU -> rHalf.pad(32),
-    LD_LW  -> rWord
-  ))
-
-  val mask = MuxLookup(io.st_type, 0.U(4.W))(Seq(
-    ST_SB -> UIntToOH(io.waddr(1, 0), 4),
-    ST_SH -> Mux(io.waddr(1), "b1100".U, "b0011".U),
-    ST_SW -> "b1111".U
-  ))
-
-  val wOff = io.waddr(1, 0)
-
-  val baseLane = MuxLookup(io.st_type, 0.U(2.W))(Seq(
-    ST_SB -> wOff,
-    ST_SH -> Cat(wOff(1), 0.U(1.W)),
-    ST_SW -> 0.U
-  ))
-
-  val shamt = (baseLane << 3)
-  val aligned = (io.wdata << shamt)(31,0)
-  val wVec = VecInit.tabulate(4)(i => aligned(8*i+7, 8*i))
-
-  mem.write(io.waddr >> 2, wVec, mask.asBools)
-}
-
 class RegFile(xlen: Int) extends Module {
   val io = IO(new Bundle {
     val raddr1 = Input(UInt(5.W))
@@ -519,24 +458,4 @@ class CoreWithTaps(xlen: Int, hexPath: String, dataHexPath: Option[String]) exte
   when (core.io.dmem.resp.fire) { dBusy := false.B }
 }
 
-class CoreWithCaches(xlen: Int, hexPath: String, dataHexPath: Option[String], sets: Int = 64) extends Module {
-  val io = IO(new Bundle {
-    val axi = new AXIMasterIF(32, 64, 4)
-  })
-
-  val core = Module(new Core(xlen, hexPath, dataHexPath))
-  val icache = Module(new ICache(xlen, CacheConfig(32, 64, 64, sets)))
-  val dcache = Module(new DCache(xlen, CacheConfig(32, 64, 64, sets)))
-  val arb    = Module(new AxiArbiter(2, addrBits = 32, idBits = 4, dataBits = 64))
-
-  // Connect core to caches
-  icache.io.mem <> core.io.imem
-  dcache.io.mem <> core.io.dmem
-
-  // Connect caches to arbiter
-  arb.io.in(0) <> icache.io.arb
-  arb.io.in(1) <> dcache.io.arb
-
-  // Export AXI master
-  io.axi <> arb.io.axi
-}
+// CoreWithCaches is replaced by Top (see Top.scala)
