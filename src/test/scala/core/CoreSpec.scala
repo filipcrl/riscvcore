@@ -88,7 +88,7 @@ class CoreSpec extends AnyFunSpec with ChiselSim {
       if (wantWaves) enableWaves()
 
       dut.reset.poke(1); dut.clock.step(1); dut.reset.poke(0)
-      dut.clock.step(60)
+      dut.clock.step(300)
       check(regsPeek(dut))
     }
   }

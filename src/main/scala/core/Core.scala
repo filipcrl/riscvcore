@@ -395,7 +395,6 @@ class Core(xlen: Int, hexPath: String, dataHexPath: Option[String]) extends Modu
   io.imem.req.bits.wdata := 0.U
   io.imem.req.bits.wstrb := 0.U
   io.imem.req.bits.size  := 2.U
-
   io.imem.resp.ready := false.B
 
   io.dmem.req.valid := false.B
@@ -428,19 +427,22 @@ class Core(xlen: Int, hexPath: String, dataHexPath: Option[String]) extends Modu
         state := sIssueLoad
       }.elsewhen(control.io.st_type =/= Control.ST_XXX) {
         state := sIssueStore
-      }.elsewhen(control.io.wb_en.asBool) {
-        regs.io.wen := true.B
-        regs.io.wdata := MuxLookup(control.io.wb_sel, 0.U)(Seq(
-          Control.WB_ALU -> alu.io.out,
-          Control.WB_PC4 -> (pc + 4.U)
-        ))
+      }.otherwise {
+        when (control.io.wb_en.asBool) {
+          regs.io.wen := true.B
+          regs.io.wdata := MuxLookup(control.io.wb_sel, 0.U)(Seq(
+            Control.WB_ALU -> alu.io.out,
+            Control.WB_PC4 -> (pc + 4.U)
+          ))
+        }
+        state := sFetch
         pc := nextPc
       }
     }
     is (sIssueLoad) {
       io.dmem.req.valid := true.B
       io.dmem.req.bits.size := ldSize(control.io.ld_type)
-      when (io.dmem.req.fire) { state := sIssueLoad }
+      when (io.dmem.req.fire) { state := sWaitLoad }
     }
     is (sWaitLoad) {
       io.dmem.resp.ready := true.B
@@ -467,12 +469,71 @@ class Core(xlen: Int, hexPath: String, dataHexPath: Option[String]) extends Modu
   }
 }
 
-class CoreWithTaps(xlen: Int, hexPath: String, dataHexPath: Option[String])
-    extends Core(xlen, hexPath, dataHexPath) {
+class Cache(xlen: Int, size: Int) extends Module {
+  val io = new Bundle {
+    val memport = Flipped(new MemPort(xlen))
+  }
+}
 
-  // Make it a real port so the simulator maps it
+class CoreWithTaps(xlen: Int, hexPath: String, dataHexPath: Option[String]) extends Module {
+  val core = Module(new Core(xlen, hexPath, dataHexPath))
+
   val regsTap = IO(Output(Vec(32, UInt(xlen.W))))
+  regsTap := BoringUtils.tapAndRead[Vec[UInt]](core.regs.regs)
 
-  // If regs.regs is inside a submodule, keep using BoringUtils to pull it out:
-  regsTap := BoringUtils.tapAndRead[Vec[UInt]](regs.regs)
+  val iMemDepth = 65536
+  val iMem = Mem(iMemDepth, UInt(32.W))
+  loadMemoryFromFileInline(iMem, hexPath)
+
+  val iBusy = RegInit(false.B)
+  val iAddrReg = RegInit(0.U(xlen.W))
+  core.io.imem.req.ready := !iBusy
+  when (core.io.imem.req.fire) {
+    iAddrReg := core.io.imem.req.bits.addr
+    iBusy := true.B
+  }
+  val iData = iMem(iAddrReg >> 2)
+  core.io.imem.resp.valid := iBusy
+  core.io.imem.resp.bits  := iData
+  when (core.io.imem.resp.fire) { iBusy := false.B }
+
+  val dMemDepth = 65536
+  val dMem = Mem(dMemDepth, Vec(4, UInt(8.W)))
+  dataHexPath.foreach(p => loadMemoryFromFileInline(dMem, p))
+
+  val dBusy     = RegInit(false.B)
+  val dAddrReg  = RegInit(0.U(xlen.W))
+  val dWdataReg = RegInit(0.U(xlen.W))
+  val dWstrbReg = RegInit(0.U((xlen/8).W))
+  val dSizeReg  = RegInit(0.U(2.W))
+
+  core.io.dmem.req.ready := !dBusy
+  when (core.io.dmem.req.fire) {
+    dAddrReg  := core.io.dmem.req.bits.addr
+    dWdataReg := core.io.dmem.req.bits.wdata
+    dWstrbReg := core.io.dmem.req.bits.wstrb
+    dSizeReg  := core.io.dmem.req.bits.size
+    dBusy     := core.io.dmem.req.bits.wstrb === 0.U
+
+    when (core.io.dmem.req.bits.wstrb.orR) {
+      val addr = core.io.dmem.req.bits.addr
+      val wdata = core.io.dmem.req.bits.wdata
+      val size  = core.io.dmem.req.bits.size
+      val baseLane = MuxLookup(size, 0.U(2.W))(Seq(
+        0.U -> addr(1,0),
+        1.U -> Cat(addr(1), 0.U(1.W)),
+        2.U -> 0.U
+      ))
+      val shamt   = (baseLane << 3)
+      val aligned = (wdata << shamt)(31,0)
+      val wVec    = VecInit.tabulate(4)(i => aligned(8*i+7, 8*i))
+      dMem.write(addr >> 2, wVec, core.io.dmem.req.bits.wstrb.asBools)
+    }
+  }
+
+  val dLine = dMem(dAddrReg >> 2)
+  val dWord = Cat(dLine.reverse)
+  core.io.dmem.resp.valid := dBusy
+  core.io.dmem.resp.bits  := dWord
+  when (core.io.dmem.resp.fire) { dBusy := false.B }
 }
