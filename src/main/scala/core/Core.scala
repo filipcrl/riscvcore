@@ -336,19 +336,6 @@ class ImmGen(val xlen: Int) extends Module {
   ).asUInt
 }
 
-/* Memory interface */
-class MemReq(xlen: Int) extends Bundle {
-  val addr = UInt(xlen.W)
-  val wdata = UInt(xlen.W)
-  val wstrb = UInt((xlen/8).W)
-  val size = UInt(2.W)
-}
-
-class MemPort(xlen: Int) extends Bundle {
-  val req = Decoupled(new MemReq(xlen))
-  val resp = Flipped(Decoupled(UInt(xlen.W)))
-}
-
 class Core(xlen: Int, hexPath: String, dataHexPath: Option[String]) extends Module {
   val io = IO(new Bundle {
     val imem = new MemPort(xlen)
@@ -469,12 +456,6 @@ class Core(xlen: Int, hexPath: String, dataHexPath: Option[String]) extends Modu
   }
 }
 
-class Cache(xlen: Int, size: Int) extends Module {
-  val io = new Bundle {
-    val memport = Flipped(new MemPort(xlen))
-  }
-}
-
 class CoreWithTaps(xlen: Int, hexPath: String, dataHexPath: Option[String]) extends Module {
   val core = Module(new Core(xlen, hexPath, dataHexPath))
 
@@ -536,4 +517,26 @@ class CoreWithTaps(xlen: Int, hexPath: String, dataHexPath: Option[String]) exte
   core.io.dmem.resp.valid := dBusy
   core.io.dmem.resp.bits  := dWord
   when (core.io.dmem.resp.fire) { dBusy := false.B }
+}
+
+class CoreWithCaches(xlen: Int, hexPath: String, dataHexPath: Option[String], sets: Int = 64) extends Module {
+  val io = IO(new Bundle {
+    val axi = new AXIMasterIF(32, 64, 4)
+  })
+
+  val core = Module(new Core(xlen, hexPath, dataHexPath))
+  val icache = Module(new ICache(xlen, CacheConfig(32, 64, 64, sets)))
+  val dcache = Module(new DCache(xlen, CacheConfig(32, 64, 64, sets)))
+  val arb    = Module(new AxiArbiter(2, addrBits = 32, idBits = 4, dataBits = 64))
+
+  // Connect core to caches
+  icache.io.mem <> core.io.imem
+  dcache.io.mem <> core.io.dmem
+
+  // Connect caches to arbiter
+  arb.io.in(0) <> icache.io.arb
+  arb.io.in(1) <> dcache.io.arb
+
+  // Export AXI master
+  io.axi <> arb.io.axi
 }
