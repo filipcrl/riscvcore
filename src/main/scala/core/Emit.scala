@@ -9,10 +9,3 @@ object EmitMigTop extends App {
     args = Array("--target-dir", "synthesized")
   )
 }
-
-object EmitTopWithMem extends App {
-  ChiselStage.emitSystemVerilogFile(
-    new Top(32),
-    args = Array("--target-dir", "synthesized")
-  )
-}

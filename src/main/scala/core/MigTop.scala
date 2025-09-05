@@ -96,8 +96,7 @@ class Mig7Series extends BlackBox {
   })
 }
 
-// FPGA top-level: MIG + Core+Caches + AXI upsizer
-class MigTop extends RawModule {
+class MigTop(initFile: Option[String] = None) extends RawModule {
   // MIG ports
   val ddr3_dq     = IO(Analog(64.W))
   val ddr3_dqs_n  = IO(Analog(8.W))
@@ -124,7 +123,7 @@ class MigTop extends RawModule {
 
   // MIG instance
   val mig = Module(new Mig7Series)
-  // Connect top-level to MIG pins
+
   ddr3_dq     <> mig.io.ddr3_dq
   ddr3_dqs_n  <> mig.io.ddr3_dqs_n
   ddr3_dqs_p  <> mig.io.ddr3_dqs_p
@@ -154,11 +153,8 @@ class MigTop extends RawModule {
   mig.io.device_temp_i := 0.U
   mig.io.sys_rst := sys_rst
 
-  // Core + caches + arbiter under UI clock
-  val top = withClockAndReset(mig.io.ui_clk, mig.io.ui_clk_sync_rst) { Module(new Top(32)) }
+  val top = withClockAndReset(mig.io.ui_clk, mig.io.ui_clk_sync_rst) { Module(new Top(32, sets=64, initFile = initFile)) }
 
-  // Connect top AXI master (512b) directly to MIG AXI slave
-  // Write Address
   mig.io.s_axi_awid    := top.io.axi.writeAddr.bits.id
   mig.io.s_axi_awaddr  := top.io.axi.writeAddr.bits.addr(29,0)
   mig.io.s_axi_awlen   := top.io.axi.writeAddr.bits.len
@@ -171,20 +167,17 @@ class MigTop extends RawModule {
   mig.io.s_axi_awvalid := top.io.axi.writeAddr.valid
   top.io.axi.writeAddr.ready := mig.io.s_axi_awready
 
-  // Write Data
   mig.io.s_axi_wdata   := top.io.axi.writeData.bits.data
   mig.io.s_axi_wstrb   := top.io.axi.writeData.bits.strb
   mig.io.s_axi_wlast   := top.io.axi.writeData.bits.last
   mig.io.s_axi_wvalid  := top.io.axi.writeData.valid
   top.io.axi.writeData.ready := mig.io.s_axi_wready
 
-  // Write Response
   mig.io.s_axi_bready  := top.io.axi.writeResp.ready
   top.io.axi.writeResp.bits.id   := mig.io.s_axi_bid
   top.io.axi.writeResp.bits.resp := mig.io.s_axi_bresp
   top.io.axi.writeResp.valid     := mig.io.s_axi_bvalid
 
-  // Read Address
   mig.io.s_axi_arid    := top.io.axi.readAddr.bits.id
   mig.io.s_axi_araddr  := top.io.axi.readAddr.bits.addr(29,0)
   mig.io.s_axi_arlen   := top.io.axi.readAddr.bits.len
@@ -197,7 +190,6 @@ class MigTop extends RawModule {
   mig.io.s_axi_arvalid := top.io.axi.readAddr.valid
   top.io.axi.readAddr.ready := mig.io.s_axi_arready
 
-  // Read Data
   mig.io.s_axi_rready := top.io.axi.readData.ready
   top.io.axi.readData.bits.id   := mig.io.s_axi_rid
   top.io.axi.readData.bits.data := mig.io.s_axi_rdata

@@ -70,7 +70,8 @@ case class CacheConfig(
   addrBits: Int = 32,
   dataBits: Int = 64,
   lineBits: Int = 512,
-  sets: Int = 8
+  sets: Int = 8,
+  initFile: Option[String] = None
 )
 
 class Cache(xlen: Int, cfg: CacheConfig = CacheConfig(), readOnly: Boolean = false) extends Module {
@@ -85,15 +86,14 @@ class Cache(xlen: Int, cfg: CacheConfig = CacheConfig(), readOnly: Boolean = fal
   val tagBits = cfg.addrBits - indexBits - offsetBits
 
   val lineT = new CacheLine(beatsPerLine, cfg.dataBits, tagBits)
-  val lines = Module(new BRam(cfg.sets, lineT))
+  val lines = Module(new BRam(cfg.sets, lineT, cfg.initFile))
 
   // Defaults
   lines.io.wen := false.B 
   lines.io.waddr := 0.U
-  lines.io.wdata := 0.U
+  lines.io.wdata := 0.U.asTypeOf(lineT)
   lines.io.ren := false.B
   lines.io.raddr := 0.U
-  lines.io.rdata := 0.U
 
   io.mem.req.ready := false.B
   io.mem.resp.valid := false.B
@@ -136,19 +136,15 @@ class Cache(xlen: Int, cfg: CacheConfig = CacheConfig(), readOnly: Boolean = fal
         reqSize := io.mem.req.bits.size
         reqIsWrite := io.mem.req.bits.wstrb.orR
 
-        when(io.mem.req.bits.wstrb.orR) {
-          state := sWriteReq
-        }.otherwise {
-          lines.io.ren := true.B
-          lines.io.raddr := idxOf(io.mem.req.bits.addr)
+        lines.io.ren := true.B
+        lines.io.raddr := idxOf(io.mem.req.bits.addr)
 
-          state := sRead
-        }
+        state := Mux(io.mem.req.bits.wstrb.orR, sWriteReq, sRead)
       }
     }
     is(sRead) {
-      var nextRData = lines.io.rdata 
-      var hit = nextRData.valid && (nextRData.tag === tagOf(reqAddr))
+      val nextRData = lines.io.rdata 
+      val hit = nextRData.valid && (nextRData.tag === tagOf(reqAddr))
 
       rData := nextRData
       state := Mux(hit, sHit, sMiss)
@@ -175,7 +171,8 @@ class Cache(xlen: Int, cfg: CacheConfig = CacheConfig(), readOnly: Boolean = fal
         val idx = idxOf(reqAddr)
         val tag = tagOf(reqAddr)
         val line = io.arb.resp.bits
-        val lineData = 0.U.asTypeOf(lineT)
+        val lineData = Wire(lineT)
+        lineData := 0.U.asTypeOf(lineT)
         for (i <- 0 until beatsPerLine) {
           val lo = i * cfg.dataBits
           val hi = lo + cfg.dataBits - 1
@@ -204,7 +201,6 @@ class Cache(xlen: Int, cfg: CacheConfig = CacheConfig(), readOnly: Boolean = fal
   }
 
   if (!readOnly) {
-    // Compute 512-bit aligned write data and 64-bit strobe for beat writes
     val byteOff64  = reqAddr(5,0) // 0..63 within 512-bit beat
     val wdata512   = (reqWdata.asUInt << (byteOff64 << 3)).asUInt
     val bytes      = (1.U << reqSize).asUInt // 1,2,4
@@ -213,7 +209,10 @@ class Cache(xlen: Int, cfg: CacheConfig = CacheConfig(), readOnly: Boolean = fal
 
     switch(state) {
       is(sWriteReq) {
-        // Forward 1-beat 512b write to AXI (partial via WSTRB)
+        val rd = lines.io.rdata
+        rData := rd
+        hitReg := rd.valid && (rd.tag === tagOf(reqAddr))
+
         io.arb.req.valid := true.B
         io.arb.req.bits.addr := Cat(reqAddr(cfg.addrBits-1, 6), 0.U(6.W))
         io.arb.req.bits.wen := true.B
@@ -227,14 +226,16 @@ class Cache(xlen: Int, cfg: CacheConfig = CacheConfig(), readOnly: Boolean = fal
         when(io.arb.resp.fire) { state := sWriteAck }
       }
       is(sWriteAck) {
-        // Update cache line on hit only
         when(hitReg) {
           val idx = idxOf(reqAddr)
           val b = beatOf(reqAddr)
-          val oldBeat = lines(idx).data(b)
-          val beatByteOff = reqAddr(5,3) // which 64b slot
+
+          val oldBeat = rData.data(b)
+
+          val beatByteOff = beatOf(reqAddr) // 0..7 (each 64b = 8 bytes)
           val localWdata64 = (wdata512 >> (beatByteOff << 6))(63,0)
           val localStrobe8 = (strobeMask >> (beatByteOff << 3))(7,0)
+
           val bytesVec = Wire(Vec(8, UInt(8.W)))
           for (i <- 0 until 8) {
             val sel = localStrobe8(i)
@@ -242,7 +243,15 @@ class Cache(xlen: Int, cfg: CacheConfig = CacheConfig(), readOnly: Boolean = fal
             val obyte = oldBeat(8*i+7, 8*i)
             bytesVec(i) := Mux(sel, wbyte, obyte)
           }
-          lines(idx).data(b) := Cat(bytesVec.reverse)
+          val newBeat = Cat(bytesVec.reverse)
+
+          val newLine = Wire(chiselTypeOf(rData))
+          newLine := rData
+          newLine.data(b) := newBeat
+
+          lines.io.wen   := true.B
+          lines.io.waddr := idx
+          lines.io.wdata := newLine
         }
         state := sWait
       }
