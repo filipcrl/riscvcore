@@ -5,7 +5,7 @@ import chisel3.util._
 import chisel3.experimental.requireIsChiselType
 import chisel3.util.experimental.loadMemoryFromFileInline
 
-/* Memory interface */
+// Memory interface bundles
 class MemReq(xlen: Int) extends Bundle {
   val addr = UInt(xlen.W)
   val wdata = UInt(xlen.W)
@@ -20,10 +20,10 @@ class MemPort(xlen: Int) extends Bundle {
 
 class ArbiterReq() extends Bundle {
   val addr  = UInt(32.W)
-  val wdata = UInt(512.W) // for line ops; for beat ops, use bits(63,0)
-  val wstrb = UInt(64.W)   // for 512-bit beat writes
-  val wen   = Bool()      // 1=write, 0=read
-  val isLine = Bool()     // 1=line (8-beat) op, 0=single beat
+  val wdata = UInt(512.W)
+  val wstrb = UInt(64.W)
+  val wen   = Bool()
+  val isLine = Bool()
 }
 
 class ArbiterPort() extends Bundle {
@@ -37,7 +37,7 @@ class CacheLine(val beatsPerLine: Int, val dataBits: Int, val tagBits: Int) exte
   val data  = Vec(beatsPerLine, UInt(dataBits.W))
 }
 
-/* Memory that will be inferted to the block RAM on the FPGA */
+// BRam: synchronous memory with optional init file
 class BRam[T <: Data](val depth: Int, gen: T, initFile: Option[String] = None) extends Module {
   requireIsChiselType(gen)
   val addrW = log2Ceil(depth)
@@ -56,7 +56,6 @@ class BRam[T <: Data](val depth: Int, gen: T, initFile: Option[String] = None) e
   initFile.foreach { f => loadMemoryFromFileInline(mem, f) }
 
   when (io.wen) { mem.write(io.waddr, io.wdata) }
-
   val raw = mem.read(io.raddr, io.ren)
 
   val bypassThisCycle = io.wen && io.ren && (io.waddr === io.raddr)
@@ -74,6 +73,7 @@ case class CacheConfig(
   initFile: Option[String] = None
 )
 
+// Cache: simple blocking cache with AXI line interface
 class Cache(xlen: Int, cfg: CacheConfig = CacheConfig(), readOnly: Boolean = false) extends Module {
   val io = IO(new Bundle {
     val mem = Flipped(new MemPort(xlen))
@@ -88,7 +88,6 @@ class Cache(xlen: Int, cfg: CacheConfig = CacheConfig(), readOnly: Boolean = fal
   val lineT = new CacheLine(beatsPerLine, cfg.dataBits, tagBits)
   val lines = Module(new BRam(cfg.sets, lineT, cfg.initFile))
 
-  // Defaults
   lines.io.wen := false.B 
   lines.io.waddr := 0.U
   lines.io.wdata := 0.U.asTypeOf(lineT)
@@ -107,7 +106,6 @@ class Cache(xlen: Int, cfg: CacheConfig = CacheConfig(), readOnly: Boolean = fal
   io.arb.req.bits.isLine:= true.B
   io.arb.resp.ready := false.B
 
-  // Helpers
   def idxOf(addr: UInt) = addr(offsetBits+indexBits-1, offsetBits)
   def tagOf(addr: UInt) = addr(cfg.addrBits-1, offsetBits+indexBits)
   def beatOf(addr: UInt) = addr(5,3)
@@ -122,7 +120,6 @@ class Cache(xlen: Int, cfg: CacheConfig = CacheConfig(), readOnly: Boolean = fal
   val wData = RegInit(0.U.asTypeOf(lineT))
   val hitReg = RegInit(false.B)
 
-  // FSM
   val sWait :: sRead :: sHit :: sMiss :: sFill :: sResp :: sWriteReq :: sWriteWait :: sWriteAck :: Nil = Enum(9)
   val state = RegInit(sWait)
 
@@ -143,7 +140,7 @@ class Cache(xlen: Int, cfg: CacheConfig = CacheConfig(), readOnly: Boolean = fal
       }
     }
     is(sRead) {
-      val nextRData = lines.io.rdata 
+      val nextRData = lines.io.rdata
       val hit = nextRData.valid && (nextRData.tag === tagOf(reqAddr))
 
       rData := nextRData
@@ -201,9 +198,9 @@ class Cache(xlen: Int, cfg: CacheConfig = CacheConfig(), readOnly: Boolean = fal
   }
 
   if (!readOnly) {
-    val byteOff64  = reqAddr(5,0) // 0..63 within 512-bit beat
+    val byteOff64  = reqAddr(5,0)
     val wdata512   = (reqWdata.asUInt << (byteOff64 << 3)).asUInt
-    val bytes      = (1.U << reqSize).asUInt // 1,2,4
+    val bytes      = (1.U << reqSize).asUInt
     val ones64wide = ((1.U(65.W) << bytes) - 1.U)(63,0)
     val strobeMask = ((ones64wide << byteOff64)(63,0))
 
@@ -232,7 +229,7 @@ class Cache(xlen: Int, cfg: CacheConfig = CacheConfig(), readOnly: Boolean = fal
 
           val oldBeat = rData.data(b)
 
-          val beatByteOff = beatOf(reqAddr) // 0..7 (each 64b = 8 bytes)
+          val beatByteOff = beatOf(reqAddr)
           val localWdata64 = (wdata512 >> (beatByteOff << 6))(63,0)
           val localStrobe8 = (strobeMask >> (beatByteOff << 3))(7,0)
 
@@ -259,6 +256,7 @@ class Cache(xlen: Int, cfg: CacheConfig = CacheConfig(), readOnly: Boolean = fal
   }
 }
 
+// AxiArbiter: 512-bit AXI read/write arbiter
 class AxiArbiter(nPorts: Int, addrBits: Int = 32, idBits: Int = 4, dataBits: Int = 512) extends Module {
   require(nPorts > 0)
   require(dataBits == 512, "Arbiter is tuned for 512-bit AXI datapath")
@@ -268,12 +266,11 @@ class AxiArbiter(nPorts: Int, addrBits: Int = 32, idBits: Int = 4, dataBits: Int
     val axi = new AXIMasterIO(addrBits, dataBits, idBits)
   })
 
-  // Defaults
   io.axi.writeAddr.valid := false.B
   io.axi.writeAddr.bits.addr  := 0.U
-  io.axi.writeAddr.bits.size  := (log2Ceil(dataBits/8)).U // 6 for 512b
-  io.axi.writeAddr.bits.len   := 0.U // single beat
-  io.axi.writeAddr.bits.burst := 1.U // INCR
+  io.axi.writeAddr.bits.size  := (log2Ceil(dataBits/8)).U
+  io.axi.writeAddr.bits.len   := 0.U
+  io.axi.writeAddr.bits.burst := 1.U
   io.axi.writeAddr.bits.id    := 0.U
   io.axi.writeAddr.bits.lock  := 0.U
   io.axi.writeAddr.bits.cache := 0.U
@@ -290,8 +287,8 @@ class AxiArbiter(nPorts: Int, addrBits: Int = 32, idBits: Int = 4, dataBits: Int
   io.axi.readAddr.valid := false.B
   io.axi.readAddr.bits.addr  := 0.U
   io.axi.readAddr.bits.size  := (log2Ceil(dataBits/8)).U
-  io.axi.readAddr.bits.len   := 0.U // single 512b beat
-  io.axi.readAddr.bits.burst := 1.U // INCR
+  io.axi.readAddr.bits.len   := 0.U
+  io.axi.readAddr.bits.burst := 1.U
   io.axi.readAddr.bits.id    := 0.U
   io.axi.readAddr.bits.lock  := 0.U
   io.axi.readAddr.bits.cache := 0.U
@@ -306,13 +303,12 @@ class AxiArbiter(nPorts: Int, addrBits: Int = 32, idBits: Int = 4, dataBits: Int
     io.in(i).resp.bits := 0.U
   }
 
-  // Internal state
   val selW = if (nPorts <= 1) 1 else log2Ceil(nPorts)
   val curPort  = RegInit(0.U(selW.W))
   val isWrite  = RegInit(false.B)
   val isLineOp = RegInit(false.B)
   val addrReg  = RegInit(0.U(addrBits.W))
-  val beatCnt  = RegInit(0.U(3.W)) // unused for 512b single-beat
+  val beatCnt  = RegInit(0.U(3.W))
   val wstrbReg = RegInit(0.U((dataBits/8).W))
 
   val wlineReg = Reg(UInt(dataBits.W))
@@ -331,24 +327,19 @@ class AxiArbiter(nPorts: Int, addrBits: Int = 32, idBits: Int = 4, dataBits: Int
     is(sIdle) {
       when(haveReq) {
         val i = nextPort
-        // Accept the request
         io.in(i).req.ready := true.B
         when(io.in(i).req.fire) {
           curPort  := i
           isWrite  := io.in(i).req.bits.wen
           isLineOp := io.in(i).req.bits.isLine
-          // Address: align to 64B beat
           addrReg  := Cat(io.in(i).req.bits.addr(addrBits-1, 6), 0.U(6.W))
-          // Capture write data (full 512b)
           wlineReg := io.in(i).req.bits.wdata
-          // Beat strobe for beat write
           wstrbReg := io.in(i).req.bits.wstrb
           state := Mux(io.in(i).req.bits.wen, sWriteAddr, sReadAddr)
         }
       }
     }
 
-    // Write path
     is(sWriteAddr) {
       io.axi.writeAddr.valid := true.B
       io.axi.writeAddr.bits.addr := addrReg
@@ -369,12 +360,9 @@ class AxiArbiter(nPorts: Int, addrBits: Int = 32, idBits: Int = 4, dataBits: Int
       when(io.axi.writeResp.fire) { state := sWriteDone }
     }
     is(sWriteDone) {
-      // Ack to requester (no data payload needed)
       io.in(curPort).resp.valid := true.B
       when(io.in(curPort).resp.fire) { state := sIdle }
     }
-
-    // Read path
     is(sReadAddr) {
       io.axi.readAddr.valid := true.B
       io.axi.readAddr.bits.addr := addrReg
@@ -389,7 +377,6 @@ class AxiArbiter(nPorts: Int, addrBits: Int = 32, idBits: Int = 4, dataBits: Int
       }
     }
     is(sReadResp) {
-      // Return the 512b line
       io.in(curPort).resp.valid := true.B
       io.in(curPort).resp.bits := rlineReg
       when(io.in(curPort).resp.fire) { state := sIdle }

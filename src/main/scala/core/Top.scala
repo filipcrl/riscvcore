@@ -5,50 +5,55 @@ import chisel3.util._
 import chisel3.util.experimental.BoringUtils
 import chisel3.util.experimental.loadMemoryFromFileInline
 
-/*
-              +----------------+
-              |                |
-              |      CPU       |
-              |                |
-              +--------+-------+
-                       |
-         +-------------+--------------+
-         |                            |
-         v                            v
-+-------------------+      +-------------------+
-| Instruction Cache |      |    Data Cache     |
-+---------+---------+      +---------+---------+
-          |                           |
-          +------------+--------------+
-                       |
-              +--------v--------+
-              |     AXI Bus     |
-              +--------+--------+
-                       |
-                +------v------+ 
-                |   Memory    |
-                +-------------+
-*/
-
+// Top: CPU + caches + AXI + peripherals
 class Top(xlen: Int, sets: Int = 64, initFile: Option[String] = None) extends Module {
   val io = IO(new Bundle {
-    val axi = new AXIMasterIO(32, 512, 4)
+    val axi  = new AXIMasterIO(32, 512, 4)
+    val leds = Output(UInt(4.W))
   })
 
   val core = Module(new Core(xlen, "", None))
   val ic   = Module(new Cache(xlen, CacheConfig(32, 64, 512, sets, initFile), readOnly = true))
   val dc   = Module(new Cache(xlen, CacheConfig(32, 64, 512, sets)))
   val arb  = Module(new AxiArbiter(2, addrBits = 32, idBits = 4, dataBits = 512))
+  val per  = Module(new Peripherials(xlen))
 
   ic.io.mem <> core.io.imem
-  dc.io.mem <> core.io.dmem
+
+  val dmem      = Wire(new MemPort(xlen))
+  val d2dc      = Wire(new MemPort(xlen))
+  val d2per     = Wire(new MemPort(xlen))
+  core.io.dmem <> dmem
+
+  val toPeriph  = dmem.req.bits.addr(xlen-1)
+  val isRead    = !dmem.req.bits.wstrb.orR
+
+  val respFromPeriph = RegInit(false.B)
+  when(dmem.req.fire && isRead) { respFromPeriph := toPeriph }
+
+  d2dc.req.bits  := dmem.req.bits
+  d2per.req.bits := dmem.req.bits
+  d2dc.req.valid  := dmem.req.valid && !toPeriph
+  d2per.req.valid := dmem.req.valid &&  toPeriph
+  dmem.req.ready  := Mux(toPeriph, d2per.req.ready, d2dc.req.ready)
+
+  dmem.resp.valid := Mux(respFromPeriph, d2per.resp.valid, d2dc.resp.valid)
+  dmem.resp.bits  := Mux(respFromPeriph, d2per.resp.bits,  d2dc.resp.bits)
+  d2per.resp.ready := dmem.resp.ready && respFromPeriph
+  d2dc.resp.ready  := dmem.resp.ready && !respFromPeriph
+
+  dc.io.mem  <> d2dc
+  per.io.mem <> d2per
 
   arb.io.in(0) <> ic.io.arb
   arb.io.in(1) <> dc.io.arb
 
   io.axi <> arb.io.axi
+
+  io.leds := per.io.leds
 }
 
+// AxiSimpleMem: simple AXI BRAM model
 class AxiSimpleMem(
   addrBits: Int = 32,
   dataBits: Int = 512,
@@ -143,7 +148,7 @@ class AxiSimpleMem(
   when(io.axi.readData.fire) { rActive := false.B }
 }
 
-// Test harness for Caches
+// TopWithMem: cache-top test harness with taps
 class TopWithMem(xlen: Int, progHex: String, dataHex: Option[String], sets: Int = 64) extends Module {
   val top = Module(new Top(xlen, sets))
   val mem = Module(new AxiSimpleMem(32, 512, 4, depthWords = 65536, progHex = Some(progHex), dataHex = dataHex))
@@ -151,4 +156,7 @@ class TopWithMem(xlen: Int, progHex: String, dataHex: Option[String], sets: Int 
 
   val regsTap = IO(Output(Vec(32, UInt(xlen.W))))
   regsTap := BoringUtils.tapAndRead[Vec[UInt]](top.core.regs.regs)
+
+  val leds = IO(Output(UInt(4.W)))
+  leds := top.io.leds
 }

@@ -4,11 +4,10 @@ import chisel3._
 import chisel3.util._
 import chisel3.experimental._
 
-// MIG 7-series memory controller black box
+// Mig7Series: MIG 7-series memory controller BlackBox
 class Mig7Series extends BlackBox {
   override def desiredName: String = "mig_7series_0"
   val io = IO(new Bundle {
-    // DDR3 SDRAM interface
     val ddr3_dq     = Analog(64.W)
     val ddr3_dqs_n  = Analog(8.W)
     val ddr3_dqs_p  = Analog(8.W)
@@ -24,19 +23,13 @@ class Mig7Series extends BlackBox {
     val ddr3_cs_n   = Output(UInt(1.W))
     val ddr3_dm     = Output(UInt(8.W))
     val ddr3_odt    = Output(UInt(1.W))
-
-    // Clocks
     val sys_clk_p   = Input(Clock())
     val sys_clk_n   = Input(Clock())
     val clk_ref_p   = Input(Clock())
     val clk_ref_n   = Input(Clock())
-
-    // User interface clocks
     val ui_clk           = Output(Clock())
     val ui_clk_sync_rst  = Output(Bool())
     val mmcm_locked      = Output(Bool())
-
-    // Control
     val aresetn      = Input(Bool())
     val app_sr_req   = Input(Bool())
     val app_ref_req  = Input(Bool())
@@ -44,9 +37,6 @@ class Mig7Series extends BlackBox {
     val app_sr_active= Output(Bool())
     val app_ref_ack  = Output(Bool())
     val app_zq_ack   = Output(Bool())
-
-    // AXI slave interface (to MIG)
-    // Write Address
     val s_axi_awid    = Input(UInt(4.W))
     val s_axi_awaddr  = Input(UInt(30.W))
     val s_axi_awlen   = Input(UInt(8.W))
@@ -58,18 +48,15 @@ class Mig7Series extends BlackBox {
     val s_axi_awqos   = Input(UInt(4.W))
     val s_axi_awvalid = Input(Bool())
     val s_axi_awready = Output(Bool())
-    // Write Data
     val s_axi_wdata   = Input(UInt(512.W))
     val s_axi_wstrb   = Input(UInt(64.W))
     val s_axi_wlast   = Input(Bool())
     val s_axi_wvalid  = Input(Bool())
     val s_axi_wready  = Output(Bool())
-    // Write Response
     val s_axi_bready  = Input(Bool())
     val s_axi_bid     = Output(UInt(4.W))
     val s_axi_bresp   = Output(UInt(2.W))
     val s_axi_bvalid  = Output(Bool())
-    // Read Address
     val s_axi_arid    = Input(UInt(4.W))
     val s_axi_araddr  = Input(UInt(30.W))
     val s_axi_arlen   = Input(UInt(8.W))
@@ -81,14 +68,12 @@ class Mig7Series extends BlackBox {
     val s_axi_arqos   = Input(UInt(4.W))
     val s_axi_arvalid = Input(Bool())
     val s_axi_arready = Output(Bool())
-    // Read Data
     val s_axi_rready  = Input(Bool())
     val s_axi_rid     = Output(UInt(4.W))
     val s_axi_rdata   = Output(UInt(512.W))
     val s_axi_rresp   = Output(UInt(2.W))
     val s_axi_rlast   = Output(Bool())
     val s_axi_rvalid  = Output(Bool())
-
     val init_calib_complete = Output(Bool())
     val device_temp_i       = Input(UInt(12.W))
     val device_temp         = Output(UInt(12.W))
@@ -96,8 +81,8 @@ class Mig7Series extends BlackBox {
   })
 }
 
+// MigTop: FPGA top with MIG
 class MigTop(initFile: Option[String] = None) extends RawModule {
-  // MIG ports
   val ddr3_dq     = IO(Analog(64.W))
   val ddr3_dqs_n  = IO(Analog(8.W))
   val ddr3_dqs_p  = IO(Analog(8.W))
@@ -120,8 +105,8 @@ class MigTop(initFile: Option[String] = None) extends RawModule {
   val clk_ref_n   = IO(Input(Clock()))
 
   val sys_rst     = IO(Input(Bool()))
+  val leds        = IO(Output(UInt(4.W)))
 
-  // MIG instance
   val mig = Module(new Mig7Series)
 
   ddr3_dq     <> mig.io.ddr3_dq
@@ -154,6 +139,7 @@ class MigTop(initFile: Option[String] = None) extends RawModule {
   mig.io.sys_rst := sys_rst
 
   val top = withClockAndReset(mig.io.ui_clk, mig.io.ui_clk_sync_rst) { Module(new Top(32, sets=64, initFile = initFile)) }
+  leds := top.io.leds
 
   mig.io.s_axi_awid    := top.io.axi.writeAddr.bits.id
   mig.io.s_axi_awaddr  := top.io.axi.writeAddr.bits.addr(29,0)

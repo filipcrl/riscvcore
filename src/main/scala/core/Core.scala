@@ -63,6 +63,7 @@ object Instructions {
   def NOP = BitPat.bitPatToUInt(BitPat("b00000000000000000000000000010011"))
 }
 
+// RegFile: 32x32 register file
 class RegFile(xlen: Int) extends Module {
   val io = IO(new Bundle {
     val raddr1 = Input(UInt(5.W))
@@ -100,6 +101,7 @@ object Alu {
   val ALU_XXX = 15.U(4.W)
 }
 
+// Alu: integer ALU
 class Alu(xlen: Int) extends Module {
   import Alu._
 
@@ -257,6 +259,7 @@ object Control {
   )
 }
 
+// Control: instruction decode
 class Control() extends Module {
   val io = IO(new Bundle {
     val inst = Input(UInt(32.W))
@@ -284,6 +287,7 @@ class Control() extends Module {
   io.br_cond := sig(8)
 }
 
+// BrCond: branch comparator
 class BrCond(val xlen: Int) extends Module {
   val io = IO(new Bundle {
     val br_cond = Input(UInt(3.W))
@@ -305,6 +309,7 @@ class BrCond(val xlen: Int) extends Module {
   ))
 }
 
+// ImmGen: immediate generator
 class ImmGen(val xlen: Int) extends Module {
   val io = IO(new Bundle {
     val inst = Input(UInt(xlen.W))
@@ -326,21 +331,13 @@ class ImmGen(val xlen: Int) extends Module {
   ).asUInt
 }
 
-class IoControl(xlen: Int) extends Bundle {
-  val addr = Output(UInt(32.W))
-  val wdata = Output(UInt(xlen.W))
-  val wstrb = Output(UInt((xlen/8).W))
-  val size = UInt(2.W)
-}
-
+// Core: RV32I core
 class Core(xlen: Int, hexPath: String, dataHexPath: Option[String]) extends Module {
   val io = IO(new Bundle {
     val imem = new MemPort(xlen)
     val dmem = new MemPort(xlen)
-  //  val ioctrl = new IoControl(xlen)
   })
 
-  // State
   val pc = RegInit(0.U(xlen.W))
   val inst = RegInit(0.U(32.W))
 
@@ -370,7 +367,6 @@ class Core(xlen: Int, hexPath: String, dataHexPath: Option[String]) extends Modu
   brcond.io.A := regs.io.rdata1
   brcond.io.B := regs.io.rdata2
 
-  // Defaults
   regs.io.wen := false.B
   regs.io.waddr := rd
   regs.io.wdata := 0.U
@@ -389,7 +385,6 @@ class Core(xlen: Int, hexPath: String, dataHexPath: Option[String]) extends Modu
   io.dmem.req.bits.size  := 2.U
   io.dmem.resp.ready := false.B
 
-  // State Machine
   val sFetch :: sWaitI :: sExec :: sIssueLoad :: sWaitLoad :: sIssueStore :: Nil = Enum(6)
   val state = RegInit(sFetch)
 
@@ -454,6 +449,7 @@ class Core(xlen: Int, hexPath: String, dataHexPath: Option[String]) extends Modu
   }
 }
 
+// CoreWithTaps: core with simple instruction/data memories
 class CoreWithTaps(xlen: Int, hexPath: String, dataHexPath: Option[String]) extends Module {
   val core = Module(new Core(xlen, hexPath, dataHexPath))
 
@@ -516,5 +512,3 @@ class CoreWithTaps(xlen: Int, hexPath: String, dataHexPath: Option[String]) exte
   core.io.dmem.resp.bits  := dWord
   when (core.io.dmem.resp.fire) { dBusy := false.B }
 }
-
-// CoreWithCaches is replaced by Top (see Top.scala)
