@@ -2,6 +2,8 @@ package core
 
 import chisel3._
 import chisel3.util._
+import chisel3.experimental.requireIsChiselType
+import chisel3.util.experimental.loadMemoryFromFileInline
 
 /* Memory interface */
 class MemReq(xlen: Int) extends Bundle {
@@ -35,11 +37,40 @@ class CacheLine(val beatsPerLine: Int, val dataBits: Int, val tagBits: Int) exte
   val data  = Vec(beatsPerLine, UInt(dataBits.W))
 }
 
+/* Memory that will be inferted to the block RAM on the FPGA */
+class BRam[T <: Data](val depth: Int, gen: T, initFile: Option[String] = None) extends Module {
+  requireIsChiselType(gen)
+  val addrW = log2Ceil(depth)
+
+  val io = IO(new Bundle {
+    val wen   = Input(Bool())
+    val waddr = Input(UInt(addrW.W))
+    val wdata = Input(gen)
+
+    val ren   = Input(Bool())
+    val raddr = Input(UInt(addrW.W))
+    val rdata = Output(gen)
+  })
+
+  val mem = SyncReadMem(depth, gen)
+  initFile.foreach { f => loadMemoryFromFileInline(mem, f) }
+
+  when (io.wen) { mem.write(io.waddr, io.wdata) }
+
+  val raw = mem.read(io.raddr, io.ren)
+
+  val bypassThisCycle = io.wen && io.ren && (io.waddr === io.raddr)
+  val bypassNextCycle = RegNext(bypassThisCycle, init=false.B)
+  val wdataNextCycle  = RegNext(io.wdata)
+
+  io.rdata := Mux(bypassNextCycle, wdataNextCycle, raw)
+}
+
 case class CacheConfig(
   addrBits: Int = 32,
   dataBits: Int = 64,
   lineBits: Int = 512,
-  sets: Int = 32
+  sets: Int = 8
 )
 
 class Cache(xlen: Int, cfg: CacheConfig = CacheConfig(), readOnly: Boolean = false) extends Module {
@@ -54,9 +85,16 @@ class Cache(xlen: Int, cfg: CacheConfig = CacheConfig(), readOnly: Boolean = fal
   val tagBits = cfg.addrBits - indexBits - offsetBits
 
   val lineT = new CacheLine(beatsPerLine, cfg.dataBits, tagBits)
-  val lines = RegInit(VecInit(Seq.fill(cfg.sets)(0.U.asTypeOf(lineT))))
+  val lines = Module(new BRam(cfg.sets, lineT))
 
   // Defaults
+  lines.io.wen := false.B 
+  lines.io.waddr := 0.U
+  lines.io.wdata := 0.U
+  lines.io.ren := false.B
+  lines.io.raddr := 0.U
+  lines.io.rdata := 0.U
+
   io.mem.req.ready := false.B
   io.mem.resp.valid := false.B
   io.mem.resp.bits := 0.U
@@ -75,46 +113,50 @@ class Cache(xlen: Int, cfg: CacheConfig = CacheConfig(), readOnly: Boolean = fal
   def beatOf(addr: UInt) = addr(5,3)
   def halfSel(addr: UInt) = addr(2)
 
-  val reqAddr   = RegInit(0.U(cfg.addrBits.W))
-  val reqWdata  = RegInit(0.U(xlen.W))
-  val reqWstrb  = RegInit(0.U((xlen/8).W))
-  val reqSize   = RegInit(0.U(2.W))
-  val reqIsWrite= RegInit(false.B)
-  val hitReg    = RegInit(false.B)
+  val reqAddr = RegInit(0.U(cfg.addrBits.W))
+  val reqWdata = RegInit(0.U(xlen.W))
+  val reqWstrb = RegInit(0.U((xlen/8).W))
+  val reqSize = RegInit(0.U(2.W))
+  val reqIsWrite = RegInit(false.B)
+  val rData = RegInit(0.U.asTypeOf(lineT))
+  val wData = RegInit(0.U.asTypeOf(lineT))
+  val hitReg = RegInit(false.B)
 
   // FSM
-  val sWait :: sHit :: sMiss :: sFill :: sResp :: sWriteReq :: sWriteWait :: sWriteAck :: Nil = Enum(8)
+  val sWait :: sRead :: sHit :: sMiss :: sFill :: sResp :: sWriteReq :: sWriteWait :: sWriteAck :: Nil = Enum(9)
   val state = RegInit(sWait)
 
   switch(state) {
     is(sWait) {
       io.mem.req.ready := true.B
       when(io.mem.req.fire) {
-        val a = io.mem.req.bits.addr
-        val i = idxOf(a)
-        val t = tagOf(a)
-        val h = lines(i).valid && (lines(i).tag === t)
-        reqAddr   := a
-        reqWdata  := io.mem.req.bits.wdata
-        reqWstrb  := io.mem.req.bits.wstrb
-        reqSize   := io.mem.req.bits.size
-        reqIsWrite:= io.mem.req.bits.wstrb.orR
-        hitReg    := h
+        reqAddr := io.mem.req.bits.addr
+        reqWdata := io.mem.req.bits.wdata
+        reqWstrb := io.mem.req.bits.wstrb
+        reqSize := io.mem.req.bits.size
+        reqIsWrite := io.mem.req.bits.wstrb.orR
+
         when(io.mem.req.bits.wstrb.orR) {
-          if (readOnly) {
-            assert(false.B, "Read-only cache received a write request")
-          } else {
-            state := sWriteReq
-          }
+          state := sWriteReq
         }.otherwise {
-          state := Mux(h, sHit, sMiss)
+          lines.io.ren := true.B
+          lines.io.raddr := idxOf(io.mem.req.bits.addr)
+
+          state := sRead
         }
       }
+    }
+    is(sRead) {
+      var nextRData = lines.io.rdata 
+      var hit = nextRData.valid && (nextRData.tag === tagOf(reqAddr))
+
+      rData := nextRData
+      state := Mux(hit, sHit, sMiss)
     }
     is(sHit) {
       val b = beatOf(reqAddr)
       val half = halfSel(reqAddr)
-      val beat = lines(idxOf(reqAddr)).data(b)
+      val beat = rData.data(b)
       val word = Mux(half.asBool, beat(63,32), beat(31,0))
       io.mem.resp.valid := true.B
       io.mem.resp.bits := word
@@ -133,20 +175,27 @@ class Cache(xlen: Int, cfg: CacheConfig = CacheConfig(), readOnly: Boolean = fal
         val idx = idxOf(reqAddr)
         val tag = tagOf(reqAddr)
         val line = io.arb.resp.bits
+        val lineData = 0.U.asTypeOf(lineT)
         for (i <- 0 until beatsPerLine) {
           val lo = i * cfg.dataBits
           val hi = lo + cfg.dataBits - 1
-          lines(idx).data(i) := line(hi, lo)
+          lineData.data(i) := line(hi, lo)
         }
-        lines(idx).tag := tag
-        lines(idx).valid := true.B
+        lineData.tag := tag
+        lineData.valid := true.B
+
+        lines.io.wen := true.B
+        lines.io.waddr := idx
+        lines.io.wdata := lineData
+
+        wData := lineData
         state := sResp
       }
     }
     is(sResp) {
       val b = beatOf(reqAddr)
       val half = halfSel(reqAddr)
-      val beat = lines(idxOf(reqAddr)).data(b)
+      val beat = wData.data(b)
       val word = Mux(half.asBool, beat(63,32), beat(31,0))
       io.mem.resp.valid := true.B
       io.mem.resp.bits := word

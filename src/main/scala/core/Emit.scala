@@ -1,13 +1,18 @@
 package core
 
 import chisel3._
-import chisel3.stage.ChiselStage
+import circt.stage.ChiselStage
 
 object EmitMigTop extends App {
-  (new ChiselStage).emitVerilog(new MigTop, args)
+  ChiselStage.emitSystemVerilogFile(
+    new MigTop,
+    args = Array("--target-dir", "synthesized")
+  )
 }
 
 object EmitTopWithMem extends App {
-  (new ChiselStage).emitVerilog(new Top(32), args)
+  ChiselStage.emitSystemVerilogFile(
+    new Top(32),
+    args = Array("--target-dir", "synthesized")
+  )
 }
-

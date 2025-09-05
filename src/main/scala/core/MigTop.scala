@@ -120,17 +120,7 @@ class MigTop extends RawModule {
   val clk_ref_p   = IO(Input(Clock()))
   val clk_ref_n   = IO(Input(Clock()))
 
-  val aresetn     = IO(Input(Bool()))
-  val app_sr_req  = IO(Input(Bool()))
-  val app_ref_req = IO(Input(Bool()))
-  val app_zq_req  = IO(Input(Bool()))
-  val app_sr_active= IO(Output(Bool()))
-  val app_ref_ack = IO(Output(Bool()))
-  val app_zq_ack  = IO(Output(Bool()))
-  val init_calib_complete = IO(Output(Bool()))
-  val device_temp_i  = IO(Input(UInt(12.W)))
-  val device_temp    = IO(Output(UInt(12.W)))
-  val sys_rst        = IO(Input(Bool()))
+  val sys_rst     = IO(Input(Bool()))
 
   // MIG instance
   val mig = Module(new Mig7Series)
@@ -156,25 +146,16 @@ class MigTop extends RawModule {
   mig.io.clk_ref_p := clk_ref_p
   mig.io.clk_ref_n := clk_ref_n
 
-  mig.io.aresetn := aresetn
-  mig.io.app_sr_req := app_sr_req
-  mig.io.app_ref_req:= app_ref_req
-  mig.io.app_zq_req := app_zq_req
+  mig.io.aresetn := sys_rst
+  mig.io.app_sr_req := false.B
+  mig.io.app_ref_req:= false.B
+  mig.io.app_zq_req := false.B
 
-  app_sr_active := mig.io.app_sr_active
-  app_ref_ack   := mig.io.app_ref_ack
-  app_zq_ack    := mig.io.app_zq_ack
-  init_calib_complete := mig.io.init_calib_complete
-  mig.io.device_temp_i := device_temp_i
-  device_temp := mig.io.device_temp
+  mig.io.device_temp_i := 0.U
   mig.io.sys_rst := sys_rst
 
-  // Clock/reset domain from MIG UI
-  val ui_clk = mig.io.ui_clk
-  val ui_reset = mig.io.ui_clk_sync_rst // active high
-
   // Core + caches + arbiter under UI clock
-  val top = withClockAndReset(ui_clk, ui_reset) { Module(new Top(32)) }
+  val top = withClockAndReset(mig.io.ui_clk, mig.io.ui_clk_sync_rst) { Module(new Top(32)) }
 
   // Connect top AXI master (512b) directly to MIG AXI slave
   // Write Address
